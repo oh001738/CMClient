@@ -690,6 +690,7 @@ npx pkg src/index.js --targets node18-linux-x64
 ---
 ## 版本註記
 
+- **v0.2.27**：精簡 TMAG Relay WebSocket 相關 log（僅保留停用、缺 API Key、嘗試連線、已連線），同步更新版本號。
 - **v0.2.23**：遙測持久層改用 SQLite（`telemetry-records.sqlite`），啟動時自動匯入舊版 JSONL 並備份。
 - **v0.2.21**：恢復 TenManMap 位置 `extra` payload 與節點詳細欄位，避免既有整合收不到資料。
 - **v0.2.20**：精簡 TenManMap 上行資訊（位置僅保留必要欄位、節點同步改為 `node.snapshot`/`node.update`），預設不再顯示 ack 訊息。
