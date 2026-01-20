@@ -17,8 +17,11 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
 COPY . .
+
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+RUN sed -i 's/\r$//' /usr/local/bin/docker-entrypoint.sh \
+    && chmod +x /usr/local/bin/docker-entrypoint.sh \
+    && chown node:node /usr/local/bin/docker-entrypoint.sh
 
 RUN mkdir -p /data/callmesh \
     && chown -R node:node /app /data
@@ -28,5 +31,5 @@ USER node
 EXPOSE 7080
 VOLUME ["/data/callmesh"]
 
-ENTRYPOINT ["docker-entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["npm", "start"]
