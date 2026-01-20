@@ -2994,19 +2994,14 @@ class CallMeshAprsBridge extends EventEmitter {
       });
       ws.on('close', (code, reason) => {
         state.connecting = false;
-        this.emitTenmanLog(
-          `[TMAG-RELAY] WebSocket 已關閉 code=${code}${reason ? ` reason=${reason.toString()}` : ''}`
-        );
         this.scheduleTmagRelayReconnect();
       });
       ws.on('error', (err) => {
         state.connecting = false;
-        this.emitTenmanLog(`[TMAG-RELAY] WebSocket 錯誤: ${err.message}`);
         this.scheduleTmagRelayReconnect();
       });
     } catch (err) {
       state.connecting = false;
-      this.emitTenmanLog(`[TMAG-RELAY] WebSocket 建立失敗: ${err.message}`);
       this.scheduleTmagRelayReconnect();
     }
   }
@@ -3055,20 +3050,18 @@ class CallMeshAprsBridge extends EventEmitter {
     const data =
       Buffer.isBuffer(payload) || payload instanceof Uint8Array
         ? Buffer.from(payload)
-      : typeof payload === 'string'
-          ? Buffer.from(payload)
-          : null;
+        : typeof payload === 'string'
+            ? Buffer.from(payload)
+            : null;
     if (!data) return;
     if (!state.websocket || state.websocket.readyState !== WebSocket.OPEN) {
       // 無佇列策略：未連線直接丟棄
       this.ensureTmagRelayWebsocket();
-      this.emitTenmanLog(`[TMAG-RELAY] 丟棄 ${data.length} bytes（未連線）`);
       return;
     }
     try {
       state.websocket.send(data);
     } catch (err) {
-      this.emitTenmanLog(`[TMAG-RELAY] 送出失敗: ${err.message}`);
     }
   }
 
