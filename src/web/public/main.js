@@ -81,6 +81,9 @@
   const relayHintOkBtn = document.getElementById('relay-hint-ok');
 
   const summaryRows = [];
+  const SUMMARY_ROW_HOP_DIRECT_CLASS = 'summary-row-hop-direct';
+  const SUMMARY_ROW_HOP_ONE_CLASS = 'summary-row-hop-one';
+  const SUMMARY_ROW_HOP_MULTI_CLASS = 'summary-row-hop-multi';
   const flowRowMap = new Map();
   const aprsHighlightedFlows = new Set();
   const mappingMeshIds = new Set();
@@ -143,6 +146,47 @@
   const nodeRegistry = new Map();
   const MESH_ID_PATTERN = /^![0-9a-f]{8}$/i;
 
+  // Page Visibility State
+  let isPageVisible = !document.hidden;
+  let pendingSummaryData = [];
+  let pendingLogData = [];
+  let pendingRenderFlows = false;
+
+  document.addEventListener('visibilitychange', () => {
+    isPageVisible = !document.hidden;
+    if (isPageVisible) {
+      // Flush pending logs (oldest first to maintain order when appending)
+      // appendLog unshifts to array and insertsBefore firstChild.
+      // So to reconstruct [Newest, ..., Oldest], we should append Oldest first?
+      // appendLog implementation:
+      // logEntries.unshift(li); logList.insertBefore(li, logList.firstChild);
+      // So if we have pendingLogData = [Newest, Oldest]
+      // append(Oldest) -> List: [Oldest]
+      // append(Newest) -> List: [Newest, Oldest]
+      // So iterate reverse.
+      if (pendingLogData.length > 0) {
+        for (let i = pendingLogData.length - 1; i >= 0; i--) {
+          appendLog(pendingLogData[i]);
+        }
+        pendingLogData = [];
+      }
+
+      // Flush pending summaries
+      if (pendingSummaryData.length > 0) {
+        for (let i = pendingSummaryData.length - 1; i >= 0; i--) {
+          appendSummary(pendingSummaryData[i]);
+        }
+        pendingSummaryData = [];
+      }
+
+      // Re-render flows if needed
+      if (pendingRenderFlows) {
+        renderFlowEntries();
+        pendingRenderFlows = false;
+      }
+    }
+  });
+
   function isIgnoredMeshId(meshId) {
     const normalized = normalizeMeshId(meshId);
     if (!normalized) return false;
@@ -166,8 +210,22 @@
   let telemetryTableFilteredCount = 0;
   let telemetryMaxTotalRecords = 20000;
   const TELEMETRY_METRIC_DEFINITIONS = {
-    batteryLevel: { label: '電量', unit: '%', decimals: 0, clamp: [0, 150], chart: true },
-    voltage: { label: '電壓', unit: 'V', decimals: 2, chart: true },
+    batteryLevel: {
+      label: '電量',
+      unit: '%',
+      decimals: 0,
+      clamp: [0, 100],
+      chart: true,
+      chartAxisRange: [0, 100]
+    },
+    voltage: {
+      label: '電壓',
+      unit: 'V',
+      decimals: 2,
+      clamp: [2.8, 4.3],
+      chart: true,
+      chartAxisRange: [2.8, 4.3]
+    },
     channelUtilization: { label: '通道使用率', unit: '%', decimals: 1, clamp: [0, 100], chart: true },
     airUtilTx: { label: '空中時間 (TX)', unit: '%', decimals: 1, clamp: [0, 100], chart: true },
     temperature: { label: '溫度', unit: '°C', decimals: 1, chart: true },
@@ -179,6 +237,111 @@
       formatter: (value) => formatSecondsAsDuration(value)
     }
   };
+  const BATTERY_COMBO_CHART_KEY = '__batteryComboChart__';
+  const ENV_COMBO_CHART_KEY = '__envComboChart__';
+  const BATTERY_COMBO_METRICS = [
+    {
+      name: 'batteryLevel',
+      styles: {
+        borderColor: '#60a5fa',
+        backgroundColor: 'rgba(96, 165, 250, 0.15)',
+        pointBackgroundColor: '#93c5fd',
+        pointBorderColor: '#60a5fa',
+        pointRadius: 0,
+        pointHoverRadius: 3,
+        borderWidth: 2,
+        tension: 0.25,
+        fill: false,
+        showLine: true,
+        order: 1
+      }
+    },
+    {
+      name: 'channelUtilization',
+      styles: {
+        borderColor: '#34d399',
+        backgroundColor: 'rgba(16, 185, 129, 0.25)',
+        pointBackgroundColor: '#6ee7b7',
+        pointBorderColor: '#10b981',
+        pointRadius: 4,
+        pointHoverRadius: 6,
+        borderWidth: 0,
+        tension: 0,
+        fill: false,
+        showLine: false,
+        order: 2
+      }
+    },
+    {
+      name: 'airUtilTx',
+      styles: {
+        borderColor: '#f97316',
+        backgroundColor: 'rgba(249, 115, 22, 0.25)',
+        pointBackgroundColor: '#fdba74',
+        pointBorderColor: '#f97316',
+        pointRadius: 4,
+        pointHoverRadius: 6,
+        borderWidth: 0,
+        tension: 0,
+        fill: false,
+        showLine: false,
+        order: 3
+      }
+    }
+  ];
+  const BATTERY_COMBO_METRIC_SET = new Set(BATTERY_COMBO_METRICS.map((item) => item.name));
+  const ENV_COMBO_METRICS = [
+    {
+      name: 'temperature',
+      axisId: 'temp',
+      styles: {
+        borderColor: '#f472b6',
+        backgroundColor: 'rgba(244, 114, 182, 0.15)',
+        pointBackgroundColor: '#f9a8d4',
+        pointBorderColor: '#f472b6',
+        pointRadius: 3,
+        pointHoverRadius: 4,
+        borderWidth: 2,
+        tension: 0.2,
+        fill: false,
+        order: 1
+      }
+    },
+    {
+      name: 'relativeHumidity',
+      axisId: 'humidity',
+      styles: {
+        borderColor: '#38bdf8',
+        backgroundColor: 'rgba(56, 189, 248, 0.18)',
+        pointBackgroundColor: '#7dd3fc',
+        pointBorderColor: '#38bdf8',
+        pointRadius: 3,
+        pointHoverRadius: 4,
+        borderWidth: 2,
+        tension: 0.2,
+        fill: false,
+        order: 2
+      }
+    },
+    {
+      name: 'barometricPressure',
+      axisId: 'pressure',
+      styles: {
+        borderColor: '#a78bfa',
+        backgroundColor: 'rgba(167, 139, 250, 0.15)',
+        pointBackgroundColor: '#c4b5fd',
+        pointBorderColor: '#a78bfa',
+        pointRadius: 3,
+        pointHoverRadius: 4,
+        borderWidth: 2,
+        tension: 0.2,
+        fill: false,
+        order: 3
+      }
+    }
+  ];
+  const ENV_COMBO_METRIC_SET = new Set(ENV_COMBO_METRICS.map((item) => item.name));
+  const BATTERY_COMBO_TOOLTIP_MAX_DELTA_MS = 5 * 60 * 1000;
   const CHANNEL_CONFIG = [
     { id: 0, code: 'CH0', name: 'Primary Channel', note: '日常主要通訊頻道' },
     { id: 1, code: 'CH1', name: 'Mesh TW', note: '跨節點廣播與共通交換' },
@@ -205,6 +368,8 @@
     NeighborInfo: '🤝',
     Encrypted: '🔒'
   };
+  const DEFAULT_TIMEZONE = 'Asia/Taipei';
+  let appTimezone = DEFAULT_TIMEZONE;
   const channelConfigs = CHANNEL_CONFIG.map((item) => ({ ...item }));
   const channelConfigMap = new Map(channelConfigs.map((item) => [item.id, item]));
   const channelMessageStore = new Map();
@@ -384,6 +549,101 @@
     return fixed.replace(/0+$/, '').replace(/\.$/, '') || '0';
   }
 
+  function normalizeTimezone(value) {
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (trimmed) {
+        return trimmed;
+      }
+    }
+    return DEFAULT_TIMEZONE;
+  }
+
+  function setAppTimezone(value) {
+    appTimezone = normalizeTimezone(value ?? appTimezone);
+  }
+
+  function getAppTimezone() {
+    return appTimezone || DEFAULT_TIMEZONE;
+  }
+
+  function coerceDate(value) {
+    if (value instanceof Date) {
+      return Number.isNaN(value.getTime()) ? null : value;
+    }
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) {
+      return null;
+    }
+    return date;
+  }
+
+  function formatDateTime(value, options = {}) {
+    const { invalidFallback = '—', ...formatOptions } = options;
+    const date = coerceDate(value);
+    if (!date) return invalidFallback;
+    return date.toLocaleString(undefined, {
+      timeZone: getAppTimezone(),
+      ...formatOptions
+    });
+  }
+
+  function getDatePartsInTimezone(value, options = {}) {
+    const date = coerceDate(value);
+    if (!date) {
+      return null;
+    }
+    const formatter = new Intl.DateTimeFormat('en-US', {
+      timeZone: getAppTimezone(),
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+      ...options
+    });
+    const parts = formatter.formatToParts(date);
+    const map = {};
+    for (const part of parts) {
+      if (part.type !== 'literal' && !(part.type in map)) {
+        map[part.type] = part.value;
+      }
+    }
+    return map;
+  }
+
+  function getTimezoneOffsetMs(value) {
+    const date = coerceDate(value);
+    if (!date) {
+      return null;
+    }
+    const parts = getDatePartsInTimezone(date);
+    if (!parts) {
+      return null;
+    }
+    const asUtc = Date.UTC(
+      Number(parts.year),
+      Number(parts.month) - 1,
+      Number(parts.day),
+      Number(parts.hour),
+      Number(parts.minute),
+      Number(parts.second)
+    );
+    return asUtc - date.getTime();
+  }
+
+  function formatTime(value, options = {}) {
+    const { invalidFallback = '—', ...formatOptions } = options;
+    const date = coerceDate(value);
+    if (!date) return invalidFallback;
+    return date.toLocaleTimeString(undefined, {
+      timeZone: getAppTimezone(),
+      ...formatOptions
+    });
+  }
+
   function setCounter(element, value) {
     if (!element) return;
     element.textContent = Number.isFinite(value) ? value.toLocaleString() : '0';
@@ -396,9 +656,7 @@
 
   function formatTimestamp(ts) {
     if (!ts) return '—';
-    const date = new Date(ts);
-    if (Number.isNaN(date.getTime())) return '—';
-    return date.toLocaleTimeString();
+    return formatTime(ts);
   }
 
   function formatRelativeTime(isoString) {
@@ -413,7 +671,7 @@
     if (hours < 24) return `${hours} 小時前`;
     const days = Math.floor(hours / 24);
     if (days < 7) return `${days} 天前`;
-    return date.toLocaleString();
+    return formatDateTime(date);
   }
 
   function formatBytes(value) {
@@ -788,7 +1046,7 @@
     const store = ensureChannelStore(channelId);
     const latest = store[0];
     if (latest) {
-      const timeLabel = latest.timestampLabel || '—';
+      const timeLabel = formatFlowTimestamp(latest.timestampMs) || latest.timestampLabel || '—';
       const fromLabel = resolveStoredMessageFromLabel(latest);
       navItem.meta.textContent = `${timeLabel} · ${fromLabel}`;
     } else {
@@ -1095,10 +1353,13 @@
   }
 
   function resolveMessageTimestamp(summary, timestampMs) {
+    if (Number.isFinite(timestampMs)) {
+      return formatFlowTimestamp(timestampMs);
+    }
     if (typeof summary.timestampLabel === 'string' && summary.timestampLabel.trim()) {
       return summary.timestampLabel.trim();
     }
-    return formatFlowTimestamp(timestampMs);
+    return formatFlowTimestamp(Date.now());
   }
 
   function buildMessageRelayLabel(summary) {
@@ -1296,7 +1557,7 @@
       return { display: '—', tooltip: '', timestamp: null };
     }
     const display = formatRelativeTime(date.toISOString());
-    const tooltip = date.toLocaleString();
+    const tooltip = formatDateTime(date);
     return { display, tooltip, timestamp };
   }
 
@@ -2555,9 +2816,17 @@ function ensureRelayGuessSuffix(label, summary) {
       telemetryUpdatedAtLabel.removeAttribute('title');
       return;
     }
-    const label = `${date.getFullYear()}/${String(date.getMonth() + 1).padStart(2, '0')}/${String(date.getDate()).padStart(2, '0')} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
-    telemetryUpdatedAtLabel.textContent = label;
-    telemetryUpdatedAtLabel.title = date.toLocaleString();
+    const labelFormatter = new Intl.DateTimeFormat('zh-TW', {
+      timeZone: getAppTimezone(),
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false
+    });
+    telemetryUpdatedAtLabel.textContent = labelFormatter.format(date);
+    telemetryUpdatedAtLabel.title = formatDateTime(date);
   }
 
   function ensureTelemetryCustomDefaults() {
@@ -2579,27 +2848,45 @@ function ensureRelayGuessSuffix(label, summary) {
     if (!Number.isFinite(ms)) {
       return '';
     }
-    const date = new Date(ms);
-    if (Number.isNaN(date.getTime())) {
+    const parts = getDatePartsInTimezone(ms);
+    if (!parts || !parts.year || !parts.month || !parts.day || !parts.hour || !parts.minute) {
       return '';
     }
-    const yyyy = date.getFullYear();
-    const mm = String(date.getMonth() + 1).padStart(2, '0');
-    const dd = String(date.getDate()).padStart(2, '0');
-    const hh = String(date.getHours()).padStart(2, '0');
-    const mi = String(date.getMinutes()).padStart(2, '0');
-    return `${yyyy}-${mm}-${dd}T${hh}:${mi}`;
+    return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}`;
   }
 
   function parseDatetimeLocal(value) {
     if (!value) {
       return null;
     }
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime())) {
+    const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(value);
+    if (!match) {
       return null;
     }
-    return date.getTime();
+    const [, yearStr, monthStr, dayStr, hourStr, minuteStr] = match;
+    const year = Number(yearStr);
+    const month = Number(monthStr);
+    const day = Number(dayStr);
+    const hour = Number(hourStr);
+    const minute = Number(minuteStr);
+    if (
+      !Number.isInteger(year) ||
+      !Number.isInteger(month) ||
+      !Number.isInteger(day) ||
+      !Number.isInteger(hour) ||
+      !Number.isInteger(minute)
+    ) {
+      return null;
+    }
+    const baseUtc = Date.UTC(year, month - 1, day, hour, minute);
+    if (!Number.isFinite(baseUtc)) {
+      return null;
+    }
+    const offset = getTimezoneOffsetMs(new Date(baseUtc));
+    if (!Number.isFinite(offset)) {
+      return null;
+    }
+    return baseUtc - offset;
   }
 
   function updateTelemetryRangeInputs() {
@@ -3295,6 +3582,7 @@ function ensureRelayGuessSuffix(label, summary) {
         rawMeshId: bucket.rawMeshId || meshKey,
         label,
         baseLabel: labelBase,
+        shortName: sanitizeNodeName(bucket.node?.shortName) || null,
         metricsCount,
         totalRecords,
         latestMs
@@ -3354,6 +3642,9 @@ function ensureRelayGuessSuffix(label, summary) {
       if (item.baseLabel) {
         telemetryNodeLookup.set(item.baseLabel.toLowerCase(), meshIdRaw);
       }
+      if (item.shortName) {
+        telemetryNodeLookup.set(item.shortName.toLowerCase(), meshIdRaw);
+      }
       telemetryNodeLookup.set(display.toLowerCase(), meshIdRaw);
 
       const searchKeys = new Set();
@@ -3371,6 +3662,9 @@ function ensureRelayGuessSuffix(label, summary) {
       }
       if (item.baseLabel) {
         searchKeys.add(item.baseLabel.toLowerCase());
+      }
+      if (item.shortName) {
+        searchKeys.add(item.shortName.toLowerCase());
       }
       telemetryNodeOptions.push({
         meshId: meshIdRaw,
@@ -3579,7 +3873,23 @@ function ensureRelayGuessSuffix(label, summary) {
     }
 
     const seriesMap = collectTelemetrySeries(records);
-    const metricsList = updateTelemetryMetricOptions(seriesMap);
+    let metricsList = updateTelemetryMetricOptions(seriesMap);
+    const activeMetrics = new Set();
+    let combinedChartRendered = false;
+
+    if (telemetryChartMode === 'all') {
+      const batteryRendered = renderBatteryComboChart(seriesMap, activeMetrics);
+      if (batteryRendered) {
+        metricsList = metricsList.filter((metric) => !BATTERY_COMBO_METRIC_SET.has(metric));
+        combinedChartRendered = true;
+      }
+      const environmentRendered = renderEnvironmentComboChart(seriesMap, activeMetrics);
+      if (environmentRendered) {
+        metricsList = metricsList.filter((metric) => !ENV_COMBO_METRIC_SET.has(metric));
+        combinedChartRendered = true;
+      }
+    }
+
     let metricsToRender = [];
     if (telemetryChartMode === 'single') {
       if (telemetryChartMetric && !seriesMap.has(telemetryChartMetric)) {
@@ -3598,14 +3908,12 @@ function ensureRelayGuessSuffix(label, summary) {
     } else {
       metricsToRender = metricsList;
     }
-    if (!metricsToRender.length) {
+    if (!metricsToRender.length && !combinedChartRendered) {
       destroyAllTelemetryCharts();
       telemetryChartsContainer.classList.add('hidden');
       telemetryChartsContainer.innerHTML = '';
       return;
     }
-
-    const activeMetrics = new Set();
 
     for (const metricName of metricsToRender) {
       const series = seriesMap.get(metricName);
@@ -3702,6 +4010,36 @@ function ensureRelayGuessSuffix(label, summary) {
   function buildTelemetryChartConfig(metricName, def, series, seriesDecimals) {
     const dataset = series.map((point) => ({ x: point.time, y: point.value }));
     const labelText = def.label || metricName;
+    const yScaleOptions = {
+      ticks: {
+        color: '#cbd5f5',
+        callback: (value, index, ticks) =>
+          formatTelemetryAxisValue(metricName, value, ticks) || value
+      },
+      grid: {
+        color: 'rgba(148, 163, 184, 0.12)'
+      }
+    };
+    if (Array.isArray(def?.chartAxisRange)) {
+      const [axisMin, axisMax] = def.chartAxisRange;
+      if (Number.isFinite(axisMin)) {
+        yScaleOptions.min = axisMin;
+        yScaleOptions.suggestedMin = axisMin;
+      }
+      if (Number.isFinite(axisMax)) {
+        yScaleOptions.max = axisMax;
+        yScaleOptions.suggestedMax = axisMax;
+      }
+      yScaleOptions.ticks.includeBounds = true;
+      yScaleOptions.ticks.autoSkip = false;
+      const range = Number(axisMax) - Number(axisMin);
+      if (Number.isFinite(range) && range > 0) {
+        const rawStep = range / 5;
+        const step = rawStep >= 1 ? Math.round(rawStep) : Number(rawStep.toFixed(2));
+        yScaleOptions.ticks.stepSize = step > 0 ? step : undefined;
+        yScaleOptions.ticks.maxTicksLimit = 6;
+      }
+    }
     return {
       type: 'line',
       data: {
@@ -3742,16 +4080,7 @@ function ensureRelayGuessSuffix(label, summary) {
               color: 'rgba(148, 163, 184, 0.12)'
             }
           },
-          y: {
-            ticks: {
-              color: '#cbd5f5',
-              callback: (value, index, ticks) =>
-                formatTelemetryAxisValue(metricName, value, ticks) || value
-            },
-            grid: {
-              color: 'rgba(148, 163, 184, 0.12)'
-            }
-          }
+          y: yScaleOptions
         },
         plugins: {
           legend: {
@@ -3761,7 +4090,7 @@ function ensureRelayGuessSuffix(label, summary) {
             callbacks: {
               title: (items) => {
                 if (!items || !items.length) return '';
-                return new Date(items[0].parsed.x).toLocaleString();
+                return formatDateTime(items[0].parsed.x);
               },
               label: (ctx) => {
                 const value = ctx.parsed?.y;
@@ -3776,6 +4105,557 @@ function ensureRelayGuessSuffix(label, summary) {
         }
       }
     };
+  }
+
+  function renderBatteryComboChart(seriesMap, activeMetrics) {
+    if (!telemetryChartsContainer) {
+      return false;
+    }
+    const available = [];
+    for (const meta of BATTERY_COMBO_METRICS) {
+      const series = seriesMap.get(meta.name);
+      if (Array.isArray(series) && series.length) {
+        available.push({ meta, series });
+      }
+    }
+    if (!available.length) {
+      return false;
+    }
+    activeMetrics.add(BATTERY_COMBO_CHART_KEY);
+    const datasetEntries = available.map(({ meta, series }) => {
+      const def = TELEMETRY_METRIC_DEFINITIONS[meta.name] || { label: meta.name };
+      const decimals = computeSeriesDecimals(meta.name, series);
+      const points = series.map((point) => ({ x: point.time, y: point.value }));
+      const styles = meta.styles || {};
+      const latestPoint = series[series.length - 1] || {};
+      const latestTimestamp = Number(latestPoint?.time);
+      return {
+        meta,
+        decimals,
+        latestValue: latestPoint?.value ?? null,
+        latestTimestamp: Number.isFinite(latestTimestamp) ? latestTimestamp : null,
+        series,
+        dataset: {
+          label: def.label || meta.name,
+          data: points,
+          telemetryDecimals: decimals,
+          telemetryMetric: meta.name,
+          borderColor: styles.borderColor || '#60a5fa',
+          backgroundColor: styles.backgroundColor ?? 'rgba(96, 165, 250, 0.18)',
+          pointBackgroundColor: styles.pointBackgroundColor ?? styles.backgroundColor ?? '#bfdbfe',
+          pointBorderColor: styles.pointBorderColor ?? styles.borderColor ?? '#60a5fa',
+          pointRadius: styles.pointRadius ?? 3,
+          pointHoverRadius: styles.pointHoverRadius ?? styles.pointRadius ?? 4,
+          borderWidth: styles.borderWidth ?? 2,
+          tension: styles.tension ?? 0,
+          fill: styles.fill ?? false,
+          showLine: styles.showLine ?? false,
+          order: styles.order ?? 1
+        }
+      };
+    });
+    if (!datasetEntries.length) {
+      return false;
+    }
+    const datasets = datasetEntries.map((entry) => entry.dataset);
+    const batteryEntry = datasetEntries.find((entry) => entry.meta.name === 'batteryLevel');
+    const latestEntry = batteryEntry || datasetEntries[0];
+    const latestMetric = latestEntry?.meta?.name;
+    const latestValue = latestEntry?.latestValue;
+    const latestDecimals = latestEntry?.decimals;
+    const latestLabel =
+      latestMetric != null
+        ? formatTelemetryFixed(latestMetric, latestValue, latestDecimals) || '—'
+        : '—';
+    const { statusText, trendText } = formatBatteryComboStatusLabel(datasetEntries);
+    const combinedStatus = trendText ? `${statusText} ｜ 電量成長 ${trendText}` : statusText;
+
+    let view = telemetryCharts.get(BATTERY_COMBO_CHART_KEY);
+    if (!view) {
+      const card = document.createElement('article');
+      card.className = 'telemetry-chart-card';
+      const header = document.createElement('div');
+      header.className = 'telemetry-chart-header';
+      const title = document.createElement('span');
+      title.className = 'telemetry-chart-title';
+      title.textContent = '電量 / 通道使用率 / 空中時間';
+      const latest = document.createElement('span');
+      latest.className = 'telemetry-chart-latest';
+      latest.textContent = latestLabel;
+      header.append(title, latest);
+      const status = document.createElement('div');
+      status.className = 'telemetry-chart-status';
+      status.textContent = combinedStatus;
+      const canvasWrap = document.createElement('div');
+      canvasWrap.className = 'telemetry-chart-canvas-wrap';
+      const canvas = document.createElement('canvas');
+      canvasWrap.appendChild(canvas);
+      card.append(header, status, canvasWrap);
+      const ctx = canvas.getContext('2d');
+      const chart = new window.Chart(ctx, buildBatteryComboChartConfig(datasets));
+      view = {
+        chart,
+        card,
+        titleEl: title,
+        latestEl: latest,
+        statusEl: status
+      };
+      telemetryCharts.set(BATTERY_COMBO_CHART_KEY, view);
+    } else {
+      view.chart.data.datasets = datasets;
+      view.chart.update('none');
+    }
+    if (view.latestEl) {
+      view.latestEl.textContent = latestLabel;
+    }
+    if (view.statusEl) {
+      view.statusEl.textContent = combinedStatus;
+    }
+    const firstChild = telemetryChartsContainer.firstChild;
+    if (firstChild) {
+      telemetryChartsContainer.insertBefore(view.card, firstChild);
+    } else {
+      telemetryChartsContainer.appendChild(view.card);
+    }
+    return true;
+  }
+
+  function renderEnvironmentComboChart(seriesMap, activeMetrics) {
+    if (!telemetryChartsContainer) {
+      return false;
+    }
+    const available = [];
+    for (const meta of ENV_COMBO_METRICS) {
+      const series = seriesMap.get(meta.name);
+      if (Array.isArray(series) && series.length) {
+        available.push({ meta, series });
+      }
+    }
+    if (!available.length) {
+      return false;
+    }
+    activeMetrics.add(ENV_COMBO_CHART_KEY);
+    const datasetEntries = available.map(({ meta, series }) => {
+      const def = TELEMETRY_METRIC_DEFINITIONS[meta.name] || { label: meta.name };
+      const decimals = computeSeriesDecimals(meta.name, series);
+      const points = series.map((point) => ({ x: point.time, y: point.value }));
+      const styles = meta.styles || {};
+      const latestPoint = series[series.length - 1] || {};
+      const latestTimestamp = Number(latestPoint?.time);
+      return {
+        meta,
+        decimals,
+        latestValue: latestPoint?.value ?? null,
+        latestTimestamp: Number.isFinite(latestTimestamp) ? latestTimestamp : null,
+        series,
+        dataset: {
+          label: def.label || meta.name,
+          data: points,
+          telemetryDecimals: decimals,
+          telemetryMetric: meta.name,
+          yAxisID: meta.axisId || meta.name,
+          borderColor: styles.borderColor || '#38bdf8',
+          backgroundColor: styles.backgroundColor ?? 'rgba(56, 189, 248, 0.18)',
+          pointBackgroundColor: styles.pointBackgroundColor ?? styles.backgroundColor ?? '#7dd3fc',
+          pointBorderColor: styles.pointBorderColor ?? styles.borderColor ?? '#38bdf8',
+          pointRadius: styles.pointRadius ?? 3,
+          pointHoverRadius: styles.pointHoverRadius ?? styles.pointRadius ?? 4,
+          borderWidth: styles.borderWidth ?? 2,
+          tension: styles.tension ?? 0.2,
+          fill: styles.fill ?? false,
+          showLine: styles.showLine ?? true,
+          order: styles.order ?? 1
+        }
+      };
+    });
+    if (!datasetEntries.length) {
+      return false;
+    }
+    const datasets = datasetEntries.map((entry) => entry.dataset);
+    const primaryEntry =
+      datasetEntries.find((entry) => entry.meta.name === 'temperature') || datasetEntries[0];
+    const latestLabel =
+      primaryEntry && primaryEntry.meta?.name
+        ? formatTelemetryFixed(primaryEntry.meta.name, primaryEntry.latestValue, primaryEntry.decimals) ||
+          '—'
+        : '—';
+    const statusLabel =
+      datasetEntries
+        .map((entry) => {
+          const label =
+            TELEMETRY_METRIC_DEFINITIONS[entry.meta.name]?.label || entry.meta.name;
+          const formatted = formatTelemetryFixed(
+            entry.meta.name,
+            entry.latestValue,
+            entry.decimals
+          );
+          if (!formatted) return null;
+          return `${label} ${formatted}`;
+        })
+        .filter(Boolean)
+        .join(' ｜ ') || '—';
+
+    let view = telemetryCharts.get(ENV_COMBO_CHART_KEY);
+    if (!view) {
+      const card = document.createElement('article');
+      card.className = 'telemetry-chart-card';
+      const header = document.createElement('div');
+      header.className = 'telemetry-chart-header';
+      const title = document.createElement('span');
+      title.className = 'telemetry-chart-title';
+      title.textContent = '環境指標（溫度 / 濕度 / 氣壓）';
+      const latest = document.createElement('span');
+      latest.className = 'telemetry-chart-latest';
+      latest.textContent = latestLabel;
+      header.append(title, latest);
+      const status = document.createElement('div');
+      status.className = 'telemetry-chart-status';
+      status.textContent = statusLabel;
+      const canvasWrap = document.createElement('div');
+      canvasWrap.className = 'telemetry-chart-canvas-wrap';
+      const canvas = document.createElement('canvas');
+      canvasWrap.appendChild(canvas);
+      card.append(header, status, canvasWrap);
+      const ctx = canvas.getContext('2d');
+      const chart = new window.Chart(ctx, buildEnvironmentComboChartConfig(datasets));
+      view = {
+        chart,
+        card,
+        titleEl: title,
+        latestEl: latest,
+        statusEl: status
+      };
+      telemetryCharts.set(ENV_COMBO_CHART_KEY, view);
+    } else {
+      view.chart.data.datasets = datasets;
+      view.chart.update('none');
+    }
+    if (view.latestEl) {
+      view.latestEl.textContent = latestLabel;
+    }
+    if (view.statusEl) {
+      view.statusEl.textContent = statusLabel;
+    }
+    telemetryChartsContainer.appendChild(view.card);
+    return true;
+  }
+
+  function buildBatteryComboChartConfig(datasets) {
+    return {
+      type: 'line',
+      data: {
+        datasets
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        parsing: false,
+        animation: false,
+        interaction: {
+          mode: 'nearest',
+          intersect: false
+        },
+        scales: {
+          x: {
+            type: 'linear',
+            ticks: {
+              color: '#cbd5f5',
+              callback: (value) => formatTelemetryAxisTick(value)
+            },
+            grid: {
+              color: 'rgba(148, 163, 184, 0.12)'
+            }
+          },
+          y: {
+            min: 0,
+            max: 100,
+            ticks: {
+              color: '#cbd5f5',
+              autoSkip: false,
+              includeBounds: true,
+              stepSize: 20,
+              maxTicksLimit: 6,
+              callback: (value, index, ticks) =>
+                formatTelemetryAxisValue('batteryLevel', value, ticks) || value
+            },
+            grid: {
+              color: 'rgba(148, 163, 184, 0.12)'
+            }
+          }
+        },
+        plugins: {
+          legend: {
+            display: true,
+            position: 'bottom',
+            labels: {
+              color: '#cbd5f5',
+              usePointStyle: true,
+              padding: 12
+            }
+          },
+          tooltip: {
+            callbacks: {
+              title: (items) => {
+                if (!items || !items.length) return '';
+                return formatDateTime(items[0].parsed.x);
+              },
+              label: (ctx) => {
+                const tooltip = ctx.chart?.tooltip;
+                const anchor = tooltip?.dataPoints?.[0];
+                if (!anchor) {
+                  const dataset = ctx.dataset ?? {};
+                  return `${dataset.label || ''}: ${ctx.formattedValue ?? ctx.parsed?.y ?? ''}`;
+                }
+                if (ctx.datasetIndex !== anchor.datasetIndex) {
+                  return null;
+                }
+                const anchorX = anchor.parsed?.x;
+                const lines = buildBatteryComboTooltipLines(ctx.chart, anchorX);
+                if (lines && lines.length) {
+                  return lines;
+                }
+                const dataset = ctx.dataset ?? {};
+                return `${dataset.label || ''}: ${ctx.formattedValue ?? ctx.parsed?.y ?? ''}`;
+              }
+            }
+          }
+        }
+      }
+    };
+  }
+
+  function buildEnvironmentComboChartConfig(datasets) {
+    const axisConfig = {
+      temp: {
+        metric: 'temperature',
+        position: 'left',
+        min: -20,
+        max: 60,
+        ticks: { stepSize: 10 }
+      },
+      humidity: {
+        metric: 'relativeHumidity',
+        position: 'right',
+        min: 0,
+        max: 100,
+        ticks: { stepSize: 20 },
+        grid: { drawOnChartArea: false }
+      },
+      pressure: {
+        metric: 'barometricPressure',
+        position: 'right',
+        min: 900,
+        max: 1100,
+        ticks: { stepSize: 20 },
+        grid: { drawOnChartArea: false }
+      }
+    };
+    const axesInUse = new Set(datasets.map((entry) => entry.yAxisID || 'environment'));
+    const scales = {
+      x: {
+        type: 'linear',
+        ticks: {
+          color: '#cbd5f5',
+          callback: (value) => formatTelemetryAxisTick(value)
+        },
+        grid: {
+          color: 'rgba(148, 163, 184, 0.12)'
+        }
+      }
+    };
+    for (const axisId of axesInUse) {
+      const config = axisConfig[axisId] || {};
+      const metricForAxis = config.metric || null;
+      const tickCallback = (value, index, ticks) => {
+        if (metricForAxis) {
+          return formatTelemetryAxisValue(metricForAxis, value, ticks) || value;
+        }
+        return value;
+      };
+      scales[axisId] = {
+        type: 'linear',
+        position: config.position || 'left',
+        grid: {
+          color: 'rgba(148, 163, 184, 0.12)',
+          drawOnChartArea: config.grid?.drawOnChartArea ?? true
+        },
+        ticks: {
+          color: '#cbd5f5',
+          callback: tickCallback
+        }
+      };
+      if (Number.isFinite(config.min)) {
+        scales[axisId].min = config.min;
+      }
+      if (Number.isFinite(config.max)) {
+        scales[axisId].max = config.max;
+      }
+      if (config.ticks?.stepSize != null) {
+        scales[axisId].ticks.stepSize = config.ticks.stepSize;
+      }
+    }
+
+    return {
+      type: 'line',
+      data: {
+        datasets
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        parsing: false,
+        animation: false,
+        interaction: {
+          mode: 'nearest',
+          intersect: false
+        },
+        scales,
+        plugins: {
+          legend: {
+            display: true,
+            labels: {
+              color: '#cbd5f5'
+            }
+          },
+          tooltip: {
+            callbacks: {
+              title: (ctx) => {
+                const timestamp = ctx?.[0]?.parsed?.x ?? ctx?.[0]?.raw?.x;
+                return formatTelemetryAxisTick(timestamp) || '';
+              },
+              label: (ctx) => {
+                const metricName = ctx.dataset?.telemetryMetric;
+                const labelText = ctx.dataset?.label || metricName || '';
+                const decimals = ctx.dataset?.telemetryDecimals;
+                const formatted =
+                  metricName != null
+                    ? formatTelemetryFixed(metricName, ctx.parsed?.y, decimals) ||
+                      ctx.parsed?.y
+                    : ctx.parsed?.y;
+                return `${labelText}: ${formatted}`;
+              }
+            }
+          }
+        }
+      }
+    };
+  }
+
+  function formatBatteryComboStatusLabel(datasetEntries) {
+    const parts = [];
+    let latestTimestamp = null;
+    if (Array.isArray(datasetEntries)) {
+      for (const entry of datasetEntries) {
+        const metricName = entry?.meta?.name;
+        if (!metricName) {
+          continue;
+        }
+        const def = TELEMETRY_METRIC_DEFINITIONS[metricName] || {};
+        const label = def.label || metricName;
+        const formatted =
+          formatTelemetryFixed(metricName, entry?.latestValue, entry?.decimals) || '—';
+        parts.push(`${label} ${formatted}`);
+        const entryTimestamp = Number(entry?.latestTimestamp);
+        if (
+          Number.isFinite(entryTimestamp) &&
+          (!Number.isFinite(latestTimestamp) || entryTimestamp > latestTimestamp)
+        ) {
+          latestTimestamp = entryTimestamp;
+        }
+      }
+    }
+    const timestampLabel = formatTelemetryStatusTimestamp(latestTimestamp);
+    const statusPrefix = timestampLabel ? `目前狀態（${timestampLabel}）：` : '目前狀態：';
+    const statusText = `${statusPrefix}${parts.length ? parts.join(' ｜ ') : '—'}`;
+    const trendText = formatBatteryComboTrendLabel(datasetEntries);
+    return { statusText, trendText };
+  }
+
+  function formatBatteryComboTrendLabel(datasetEntries) {
+    if (!Array.isArray(datasetEntries)) {
+      return null;
+    }
+    const entry = datasetEntries.find((item) => item?.meta?.name === 'batteryLevel');
+    if (!entry || !Array.isArray(entry.series)) {
+      return null;
+    }
+    const delta = computeBatteryAverageDelta(entry.series);
+    if (!Number.isFinite(delta)) {
+      return null;
+    }
+    const decimals = Math.abs(delta) >= 1 ? 1 : 2;
+    let rounded = Number(delta.toFixed(decimals));
+    if (Object.is(rounded, -0)) {
+      rounded = 0;
+    }
+    const sign = rounded > 0 ? '+' : '';
+    return `${sign}${rounded.toFixed(decimals)}%`;
+  }
+
+  function computeBatteryAverageDelta(series) {
+    if (!Array.isArray(series) || series.length < 2) {
+      return null;
+    }
+    const finiteSeries = series
+      .map((point) => Number(point?.value ?? point?.y))
+      .filter((value) => Number.isFinite(value));
+    if (finiteSeries.length < 2) {
+      return null;
+    }
+    const edgeCount = Math.max(1, Math.floor(finiteSeries.length * 0.2));
+    const headValues = finiteSeries.slice(0, edgeCount);
+    const tailValues = finiteSeries.slice(-edgeCount);
+    const avg = (values) => values.reduce((sum, value) => sum + value, 0) / values.length;
+    const startAvg = avg(headValues);
+    const endAvg = avg(tailValues);
+    return endAvg - startAvg;
+  }
+
+  function buildBatteryComboTooltipLines(chart, anchorX) {
+    if (!chart || !Number.isFinite(anchorX)) {
+      return null;
+    }
+    const lines = [];
+    for (const dataset of chart.data.datasets || []) {
+      const point = findPointNearX(dataset.data, anchorX, BATTERY_COMBO_TOOLTIP_MAX_DELTA_MS);
+      if (!point) continue;
+      const metricName = dataset.telemetryMetric;
+      const decimals = dataset.telemetryDecimals;
+      const formatted =
+        metricName != null
+          ? formatTelemetryFixed(metricName, point.y, decimals) || point.y
+          : point.y;
+      lines.push(`${dataset.label || ''}: ${formatted}`);
+    }
+    return lines.length ? lines : null;
+  }
+
+  function findPointNearX(data, targetX, tolerance = BATTERY_COMBO_TOOLTIP_MAX_DELTA_MS) {
+    if (!Array.isArray(data) || !Number.isFinite(targetX)) {
+      return null;
+    }
+    let closestPoint = null;
+    let minDelta = Infinity;
+    for (const entry of data) {
+      if (!entry) continue;
+      const x = Number(entry.x ?? entry[0]);
+      const y = Number(entry.y ?? entry[1]);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) {
+        continue;
+      }
+      const delta = Math.abs(x - targetX);
+      if (delta < minDelta) {
+        minDelta = delta;
+        closestPoint = { x, y };
+      }
+    }
+    if (!closestPoint) {
+      return null;
+    }
+    if (Number.isFinite(tolerance) && minDelta > tolerance) {
+      return null;
+    }
+    return closestPoint;
   }
 
   function destroyAllTelemetryCharts() {
@@ -3825,16 +4705,15 @@ function ensureRelayGuessSuffix(label, summary) {
     if (!Number.isFinite(ms)) {
       return '—';
     }
-    const date = new Date(ms);
-    if (Number.isNaN(date.getTime())) {
-      return '—';
-    }
-    const yyyy = date.getFullYear();
-    const mm = String(date.getMonth() + 1).padStart(2, '0');
-    const dd = String(date.getDate()).padStart(2, '0');
-    const hh = String(date.getHours()).padStart(2, '0');
-    const mi = String(date.getMinutes()).padStart(2, '0');
-    return `${yyyy}/${mm}/${dd} ${hh}:${mi}`;
+    return formatDateTime(ms, {
+      invalidFallback: '—',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false
+    });
   }
 
   function flattenTelemetryMetrics(metrics, prefix = '', target = []) {
@@ -4032,19 +4911,30 @@ function ensureRelayGuessSuffix(label, summary) {
   }
 
   function formatTelemetryAxisTick(value) {
-    const numeric = Number(value);
-    if (!Number.isFinite(numeric)) {
+    const date = coerceDate(value);
+    if (!date) {
       return '';
     }
-    const date = new Date(numeric);
-    if (Number.isNaN(date.getTime())) {
+    const formatter = new Intl.DateTimeFormat('zh-TW', {
+      timeZone: getAppTimezone(),
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false
+    });
+    return formatter.format(date);
+  }
+
+  function formatTelemetryStatusTimestamp(timestamp) {
+    if (!Number.isFinite(timestamp)) {
       return '';
     }
-    const mm = String(date.getMonth() + 1).padStart(2, '0');
-    const dd = String(date.getDate()).padStart(2, '0');
-    const hh = String(date.getHours()).padStart(2, '0');
-    const mi = String(date.getMinutes()).padStart(2, '0');
-    return `${mm}/${dd} ${hh}:${mi}`;
+    const formatted = formatTelemetryAxisTick(timestamp);
+    if (formatted) {
+      return formatted;
+    }
+    return formatDateTime(timestamp, { invalidFallback: '' });
   }
 
   function computeSeriesDecimals(metricName, series) {
@@ -4847,8 +5737,6 @@ function ensureRelayGuessSuffix(label, summary) {
         return '本機冷卻時間內已上傳';
       case 'seen-on-feed':
         return 'APRS-IS 已有相同封包';
-      case 'recent-activity':
-        return '呼號冷卻中';
       default:
         return '不符合 APRS 上傳條件';
     }
@@ -4913,7 +5801,7 @@ function ensureRelayGuessSuffix(label, summary) {
     const context = entry.pendingReasonContext;
     if (context && Number.isFinite(context.remainingMs)) {
       const seconds = Math.max(1, Math.ceil(context.remainingMs / 1000));
-      lines.push(`冷卻剩餘：約 ${seconds} 秒`);
+      lines.push(`需等待：約 ${seconds} 秒`);
     }
     if (Array.isArray(entry.pendingReasonDetails)) {
       entry.pendingReasonDetails.forEach((line) => {
@@ -4933,9 +5821,89 @@ function ensureRelayGuessSuffix(label, summary) {
       const badgeText = aprsCallsign
         ? `APRS: ${aprsCallsign}${label ? `（${label}）` : ''}`
         : `APRS 拒絕：${label}`;
+      delete row.dataset.aprsSuccess;
       row.classList.remove('summary-row-aprs');
       row.classList.add('summary-row-aprs-rejected');
       setAprsBadge(row, badgeText, { variant: 'rejected', datasetValue: aprsCallsign });
+    }
+  }
+
+  function hasHopHighlight(row) {
+    if (!row) return false;
+    return (
+      row.classList.contains(SUMMARY_ROW_HOP_DIRECT_CLASS) ||
+      row.classList.contains(SUMMARY_ROW_HOP_ONE_CLASS) ||
+      row.classList.contains(SUMMARY_ROW_HOP_MULTI_CLASS)
+    );
+  }
+
+  function updateAprsSuccessClass(row) {
+    if (!row) return;
+    const isPositionRow = row.dataset.summaryType === 'position';
+    if (row.dataset.aprsSuccess === '1' && !hasHopHighlight(row) && isPositionRow) {
+      row.classList.add('summary-row-aprs');
+      row.classList.remove('summary-row-aprs-rejected');
+    } else {
+      row.classList.remove('summary-row-aprs');
+    }
+  }
+
+  function setAprsSuccessFlag(row, enabled) {
+    if (!row) return;
+    if (enabled) {
+      row.dataset.aprsSuccess = '1';
+    } else {
+      delete row.dataset.aprsSuccess;
+    }
+    updateAprsSuccessClass(row);
+  }
+
+  function applyHopHighlight(row, summary) {
+    if (!row || !summary) return;
+    row.classList.remove(
+      SUMMARY_ROW_HOP_DIRECT_CLASS,
+      SUMMARY_ROW_HOP_ONE_CLASS,
+      SUMMARY_ROW_HOP_MULTI_CLASS
+    );
+    const isMapping = row.classList.contains('summary-row-mapped');
+    if (!isMapping) {
+      updateAprsSuccessClass(row);
+      return;
+    }
+    const isPositionPacket =
+      typeof summary.type === 'string' && summary.type.trim().toLowerCase() === 'position';
+    if (!isPositionPacket) {
+      updateAprsSuccessClass(row);
+      return;
+    }
+    const hopInfo = extractHopInfo(summary);
+    if (!hopInfo || hopInfo.limitOnly || hopInfo.usedHops == null) {
+      updateAprsSuccessClass(row);
+      return;
+    }
+    if (hopInfo.usedHops <= 0) {
+      row.classList.add(SUMMARY_ROW_HOP_DIRECT_CLASS);
+    } else if (hopInfo.usedHops === 1) {
+      row.classList.add(SUMMARY_ROW_HOP_ONE_CLASS);
+    } else if (hopInfo.usedHops > 1) {
+      row.classList.add(SUMMARY_ROW_HOP_MULTI_CLASS);
+    }
+    updateAprsSuccessClass(row);
+  }
+
+  function applySummaryTypeClass(row, summary) {
+    if (!row || !summary) return;
+    const typeKey =
+      typeof summary.type === 'string' ? summary.type.trim().toLowerCase() : '';
+    if (typeKey) {
+      row.dataset.summaryType = typeKey;
+    } else {
+      delete row.dataset.summaryType;
+    }
+    if (typeKey === 'position') {
+      row.classList.add('summary-row-position');
+    } else {
+      row.classList.remove('summary-row-position');
     }
   }
 
@@ -4956,6 +5924,14 @@ function ensureRelayGuessSuffix(label, summary) {
   }
 
   function appendSummary(summary, options = {}) {
+    if (!isPageVisible) {
+      pendingSummaryData.unshift(summary);
+      if (pendingSummaryData.length > MAX_SUMMARY_ROWS) {
+        pendingSummaryData.pop();
+      }
+      registerFlow(summary);
+      return;
+    }
     if (!summary.selfMeshId && currentSelfMeshId) {
       summary.selfMeshId = currentSelfMeshId;
     }
@@ -4968,6 +5944,7 @@ function ensureRelayGuessSuffix(label, summary) {
 
     const row = createSummaryRow(summary);
     row.__summaryData = summary;
+    applySummaryTypeClass(row, summary);
     const meshId = normalizeMeshId(summary?.from?.meshId || summary?.from?.meshIdNormalized);
     if (meshId) {
       row.dataset.meshId = meshId;
@@ -4976,13 +5953,14 @@ function ensureRelayGuessSuffix(label, summary) {
       }
     }
 
+    applyHopHighlight(row, summary);
+
     const flowId = summary?.flowId;
     if (flowId) {
       row.dataset.flowId = flowId;
       flowRowMap.set(flowId, row);
       if (aprsHighlightedFlows.has(flowId)) {
-        row.classList.add('summary-row-aprs');
-        row.classList.remove('summary-row-aprs-rejected');
+        setAprsSuccessFlag(row, true);
         aprsHighlightedFlows.delete(flowId);
       }
       const aprsCallsign = flowAprsCallsigns.get(flowId);
@@ -5022,6 +6000,7 @@ function ensureRelayGuessSuffix(label, summary) {
       if (!row || !row.__summaryData) continue;
       const summary = row.__summaryData;
       hydrateSummaryNodes(summary);
+      applySummaryTypeClass(row, summary);
       const cells = row.children;
       if (!cells || cells.length < 3) {
         continue;
@@ -5412,6 +6391,10 @@ function ensureRelayGuessSuffix(label, summary) {
   }
 
   function renderFlowEntries() {
+    if (!isPageVisible) {
+      pendingRenderFlows = true;
+      return;
+    }
     if (!flowList || !flowEmptyState) return;
     const term = flowSearchTerm;
     const filtered = flowEntries.filter((entry) => {
@@ -5646,12 +6629,13 @@ function ensureRelayGuessSuffix(label, summary) {
   }
 
   function formatFlowTimestamp(timestampMs) {
-    const date = new Date(timestampMs);
-    if (Number.isNaN(date.getTime())) return '—';
-    const hh = `${date.getHours()}`.padStart(2, '0');
-    const mm = `${date.getMinutes()}`.padStart(2, '0');
-    const ss = `${date.getSeconds()}`.padStart(2, '0');
-    return `${hh}:${mm}:${ss}`;
+    return formatTime(timestampMs, {
+      invalidFallback: '—',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false
+    });
   }
 
   function resolveFlowIcon(type) {
@@ -5836,6 +6820,13 @@ function ensureRelayGuessSuffix(label, summary) {
   }
 
   function appendLog(entry) {
+    if (!isPageVisible) {
+      pendingLogData.unshift(entry);
+      if (pendingLogData.length > MAX_LOG_ENTRIES) {
+        pendingLogData.pop();
+      }
+      return;
+    }
     if (!entry || !logList) return;
     const li = document.createElement('li');
     li.className = 'log-entry';
@@ -5863,8 +6854,7 @@ function ensureRelayGuessSuffix(label, summary) {
     aprsHighlightedFlows.add(info.flowId);
     const row = flowRowMap.get(info.flowId);
     if (row) {
-      row.classList.add('summary-row-aprs');
-      row.classList.remove('summary-row-aprs-rejected');
+      setAprsSuccessFlag(row, true);
       aprsHighlightedFlows.delete(info.flowId);
       if (callsign) {
         setAprsBadge(row, `APRS: ${callsign}`, { variant: 'success', datasetValue: callsign });
@@ -5992,6 +6982,9 @@ function ensureRelayGuessSuffix(label, summary) {
   }
 
   function updateAppInfo(info) {
+    if (info && typeof info.timezone === 'string') {
+      setAppTimezone(info.timezone);
+    }
     if (!appVersionLabel) return;
     const version =
       typeof info?.version === 'string' && info.version.trim()
@@ -6115,6 +7108,7 @@ function ensureRelayGuessSuffix(label, summary) {
       if (!summary.selfMeshId && currentSelfMeshId) {
         summary.selfMeshId = currentSelfMeshId;
       }
+      applyHopHighlight(row, summary);
       const relayCell = row.cells?.[2];
       if (relayCell) {
         updateRelayCellDisplay(relayCell, summary);

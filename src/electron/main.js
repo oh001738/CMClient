@@ -38,10 +38,12 @@ const { CallMeshAprsBridge } = require('../callmesh/aprsBridge');
 const { WebDashboardServer } = require('../web/server');
 const { sanitizeSummaryForDisplay } = require('../utils/summaryDisplay');
 const { SerialPort } = require('serialport');
+const { getAppTimezone, formatTimestampLabel } = require('../timezone');
 
 const HEARTBEAT_INTERVAL_MS = 60_000;
 const MESSAGE_LOG_FILENAME = 'message-log.jsonl';
 const MESSAGE_MAX_PER_CHANNEL = 200;
+const appTimezone = getAppTimezone();
 
 const messageStore = new Map();
 let messageWritePromise = Promise.resolve();
@@ -122,7 +124,7 @@ function sanitizeMessageSummary(summary) {
     timestampLabel:
       typeof summary.timestampLabel === 'string' && summary.timestampLabel.trim()
         ? summary.timestampLabel.trim()
-        : new Date(timestampMs).toISOString(),
+        : formatTimestampLabel(timestampMs, { timeZone: appTimezone }),
     flowId: flowIdRaw,
     meshPacketId: Number.isFinite(summary.meshPacketId) ? Number(summary.meshPacketId) : null,
     replyId: Number.isFinite(summary.replyId) ? Number(summary.replyId) : null,
@@ -746,6 +748,7 @@ async function startWebDashboard() {
     try {
       const options = {
         appVersion,
+        timezone: appTimezone,
         relayStatsPath: path.join(getCallMeshDataDir(), 'relay-link-stats.json'),
         relayStatsStore: bridge?.getDataStore?.(),
         messageLogPath: getMessageLogPath(),
@@ -759,7 +762,7 @@ async function startWebDashboard() {
       }
       const server = new WebDashboardServer(options);
       await server.start();
-      server.setAppVersion(appVersion);
+      server.setAppInfo({ version: appVersion, timezone: appTimezone });
       webServer = server;
       return true;
     } catch (err) {
@@ -874,7 +877,8 @@ function waitForInitialMeshtasticConnection(nativeClient, { timeoutMs = 15_000 }
 }
 
 ipcMain.handle('app:get-info', async () => ({
-  version: appVersion
+  version: appVersion,
+  timezone: appTimezone
 }));
 
 ipcMain.handle('nodes:get-snapshot', async () => {
@@ -1158,7 +1162,10 @@ ipcMain.handle('meshtastic:connect', async (_event, options) => {
     processSummary(summary);
   });
 
-  client.on('fromRadio', ({ message }) => {
+  client.on('fromRadio', ({ message, rawPayload, summary }) => {
+    if (bridge && typeof bridge.forwardTmagRelayFromRadio === 'function') {
+      bridge.forwardTmagRelayFromRadio({ message, rawPayload, summary });
+    }
     if (!message) return;
     try {
       const plainObject = client.toObject(message, {
@@ -1169,6 +1176,12 @@ ipcMain.handle('meshtastic:connect', async (_event, options) => {
       console.error('序列化 Meshtastic 訊息失敗:', err);
     }
   });
+
+  if (bridge && typeof bridge.forwardTmagRelayToRadio === 'function') {
+    client.on('toRadioRaw', (payloadBuffer) => {
+      bridge.forwardTmagRelayToRadio(payloadBuffer);
+    });
+  }
 
   client.on('myInfo', (info) => {
     bridge?.handleMeshtasticMyInfo(info);

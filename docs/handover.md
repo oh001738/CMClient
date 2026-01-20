@@ -8,17 +8,24 @@
 
 - **Web Dashboard 事件精簡**：`callmesh` SSE payload 僅保留前端使用欄位（狀態、Mapping 摘要、Provision、APRS 狀態），敏感資訊如 `verifiedKey`、agent 字串已移除。
 - **/debug 新增 APRS 去重快照**：`http://<host>:7080/debug` 現在會回傳 `aprsDedup` 區段，包含目前連線狀態、`packetCache` / `localTxHistory` / `callsignSummary` 等快取內容，可直接驗證哪些呼號被伺服器下發或被節流。
+- **APRS 去重快取持久化**：`aprs_packet_cache`、`aprs_local_tx`、`aprs_callsign_summary`、`aprs_position_digest` 同步寫入 `callmesh-data.sqlite`，重啟後會自動載回並重新套用 TTL，避免服務重啟時短暫失去去重記憶。
+- **APRS 防回朔 Gate**：上傳前新增 anti-backtrack 兩階段門檻（速度上限 + 軌跡群距離 + pending 二次確認），狀態分離 `last/prev` 與 pending，並持久化至 `callmesh-data.sqlite` 的 `aprs_backtrack_state`；/debug 會顯示當前 pending 與模式，用來避免亂序或晚到封包造成位置倒退。
 - **CallMesh 狀態顯示調整**：GUI/Web 均以「正常／異常」兩態對外呈現；異常代表未驗證 Key 或處於 degraded。
 - **遙測圖表**：Chart.js Tooltip 會依實際最小差距動態套用小數位數，避免相同值因四捨五入看似變化；Y 軸／最新值同步採用此精度。
 - **Web Telemetry 初始同步**：Electron 啟動以及 API Key 驗證流程完成後，都會將最新遙測快照播送給 Web Server，確保頁面立即有資料。
 - **SSE 管線**：Electron 端每當遙測 `append/reset` 出現時，會同時廣播給 Renderer 與 Web Server，兩側資料來源一致。
 - **CLI Summary Log**：`node src/index.js` 新增 `--summary-log` 旗標，會將所有 summary 事件寫入 `CALLMESH_ARTIFACTS_DIR/logs/summary-YYYYMMDD.jsonl`；亦可用 `--summary-log-dir` 指定輸出目錄，便於追蹤 directed 封包或分析網路事件。
 - **Web 封包摘要對齊 GUI**：Web Dashboard 的封包表格改用與 GUI 相同的欄位順序、型別 icon、Detail DOM 與節點顯示邏輯，並在 SSE 初始階段先送出 `node-snapshot` 再推 `summary-batch`，避免連線剛建立時一度出現 `unknown`。
+- **封包底色規則**：只有 `type=Position` 的封包會套用 Mapping／APRS／跳數底色；Mapping 位置封包顯示青色底，APR S 成功顯示綠色底，並依跳數染成「直收（藍）／1 跳（黃）／>1 跳（紫）」，拒絕上傳則仍以紅底標示。
 - **節點資料庫**：新增 `src/nodeDatabase.js`，集中維護 Mesh 節點的長名稱、模型、角色與最後出現時間；CLI、Electron、Web 均透過 Bridge 發佈 `node` / `node-snapshot` 事件使用同一份資料。2025-11-20 起，只要收到含合法 Mesh ID 的封包（NodeInfo / MyInfo / 其他 summary）即可立即建立節點，之後再由 NodeInfo 慢慢補齊名稱與型號，避免清庫後畫面長時間只有 Mesh ID。
 - **節點清單座標顯示**：Electron / Web 節點頁新增「座標」欄，會顯示緯度、經度與高度（若可用），並支援以座標字串搜尋；同時過濾 `!abcd` 前綴暫存 ID。
 - **遙測統計**：Bridge 會回傳遙測筆數、節點數及 `telemetry-records.sqlite` 檔案大小。Electron Telemetry 頁與 Web Dashboard 均顯示最新統計。
 - **遙測 CSV 下載**：Electron 與 Web 遙測頁新增「下載 CSV」按鈕，依目前節點與範圍匯出遙測資料。
 - **遙測最後轉發與跳數**：Telemetry 紀錄同步保存最後轉發節點與跳數資訊，桌面／Web UI 及 CSV 皆可檢視（含推測提示）。
+- **遙測電量圖表整合**：Web Dashboard 與 Electron Telemetry 將電量、通道使用率與空中時間集中在同一張百分比圖（電量折線、其他為散點），Y 軸固定 0%~100%，方便快速比較趨勢；卡片標題下方會顯示「目前狀態」以及依使用者選擇區間計算出的「電量成長」，以首尾 20% 樣本的平均值比較輸出 `+/-x%`，可以立即判斷該時段是在充電還是放電。建議解讀：24 小時區間 ±2~3% 屬於輕微波動，超過 ±5% 代表供電或負載異常；30 天區間若累積跌破 -5% 則應檢查充電策略或長期耗電來源。
+- **遙測狀態時間標記**：「電量 / 通道使用率 / 空中時間」卡片的「目前狀態」文字會附註最新樣本的時間（`MM/DD HH:MM`），便於判斷數值是否為即時資料。
+- **遙測電壓刻度固定**：考量現場節點皆為 18650 1S，電壓圖表 Y 軸固定 2.8~4.3 V，便於觀察充放電變化並自動裁切雜訊。
+- **行動裝置圖表刻度**：定義了固定範圍的圖表（電量、電壓）會強制顯示上下限並使用等距刻度，確保手機上不會因 Chart.js 自動省略而看不到 100% 與 4.3 V。
 - **GUI 訊息頻道持久化**：桌面版新增「訊息」分頁，將 CH0~CH3 文字封包以 `callmesh-data.sqlite` 的 `message_log` 表保存並自動復原，預設每頻道保留 200 筆，並顯示來源節點、跳數與最後轉發節點（升級時會自動匯入舊版 `message-log.jsonl`）。2025-11 之後改採欄位化結構，訊息主體寫入 `message_log`，節點快照同步落在 `message_nodes`，附註行寫入 `message_extra_lines`，不再持久化整筆 JSON。
 - **訊息來源名稱對齊節點資料庫**：儲存的文字訊息會帶入節點 Mesh ID，重新載入時會回查節點資料庫補齊長短名，避免僅顯示 Mesh ID。
 - **最後轉發推測升級**：`meshtasticClient` 會比對 `callmesh-data.sqlite` 中的 `relay_stats` 與節點資料庫，若韌體僅回傳尾碼則使用歷史 SNR/RSSI 推測完整節點並產生說明字串。
@@ -30,9 +37,12 @@
 - **CLI 旗標**：預設關閉 Web UI；若需啟動可加上 `--web-ui`。Electron 亦可透過設定頁切換，或以 `TMAG_WEB_DASHBOARD` 強制指定。
 - **連線設定即時套用**：Electron 設定頁調整 TCP/Serial 模式、主機位址或 Serial 裝置後，會即時觸發重連並沿用更新後參數，無需手動點擊「連線」。
 - **Serial 自動重連對齊**：Serial 連線現在使用與 TCP 相同的自動重連、閒置檢測與錯誤回復流程；中斷時會進入同一套 `startReconnectLoop()` 機制。
-- **TenManMap 分享偏好持久化**：CLI (`--no-share-with-tenmanmap`)、環境變數 (`TENMAN_DISABLE=1`) 與 GUI 勾選會寫入偏好檔並呼叫 `setTenmanShareEnabled()`，即時控制資料是否同步至 TenManMap 與其合作夥伴。
+- **TenManMap 分享偏好持久化**：CLI (`--no-share-with-tenmanmap`)、環境變數 (`TENMAN_DISABLE=1`) 與 GUI 勾選會寫入偏好檔並呼叫 `setTenmanShareEnabled()`，即時控制資料是否同步至 TenManMap 與其合作夥伴；TMAG Relay 上傳（raw fromRadio/toRadio）也跟此開關綁定，關閉分享時 Relay 會同步關閉。
+- **TMAG Relay 認證與行為調整**：TMAG Relay WebSocket 連線現必須使用 CallMesh 已驗證的 API Key，連線時自動帶 `Authorization: Bearer <API Key>`，缺 Key 或未驗證時不會嘗試連線。Relay 採「不佇列」策略，未連線時直接丟棄封包；CLI 與 Electron 均會將所有 Meshtastic 原始 protobuf（fromRadio/toRadioRaw）直接推送給 Relay。
 - **TenManMap 訊息互通**：TenManMap WebSocket 現可接收 Meshtastic 文字封包（`message.publish`），並支援透過 `send_message` 命令回傳廣播文字；套用 5 秒節流與長度檢查，詳細規格見 `docs/tenmanmap-message-bridge.md`。
 - **TenManMap 回覆與自發訊息同步**：TenManMap 下行訊息可攜帶 `destination` / `reply_id`；橋接層會在廣播時保留 `reply_to`、在 Meshtastic 封包寫入 `reply_id`，並回報新的 `mesh_packet_id`。CLI / Electron / Web 會發出合成 summary 以顯示自身送出的訊息（含回覆箭頭資訊），iOS/Android App 亦可藉由 `reply_id` 顯示回覆符號。
+- **TenManMap WebSocket 容錯**：`resetTenmanWebsocket()` 會在呼叫 `terminate()` 前先註冊一次性 `error` 監聽，確保 5xx 或早期關閉導致的「WebSocket was closed before the connection was established」不再泡泡到頂層而讓橋接流程崩潰。
+- **UI 時區固定**：Web Dashboard 與 Electron UI 的時間顯示預設鎖定 `Asia/Taipei`，可透過 `TMAG_TIMEZONE` 覆寫，所有 Flow/訊息/遙測時間戳與 datetime 輸入都會套用此設定。
 
 ## 1. 專案定位與核心價值
 
@@ -267,7 +277,7 @@ CMClient/
      - 若節點資料庫有座標資訊，訊息尾端會顯示距離與最後更新時間差，例如 `22.9 km (3 分鐘前)`；距離以 Provision 座標為基準計算。
   3. **遙測數據**：Chart.js 畫面與資料表，可依節點、時間範圍、指標模式切換；節點輸入框整合了 datalist 與搜尋，鍵入 Mesh ID、暱稱或任意關鍵字即可切換節點或直接套用全域篩選，輸入清空時會自動還原到最近選取節點並顯示完整資料；頁面右上角顯示「筆數 / 節點 / 檔案大小」統計並提供「清空遙測數據」按鈕。
   4. **Mapping 封包追蹤**：具 Mapping 的位置封包列表，支援搜尋、狀態篩選與 CSV 匯出；節點資訊與 APRS 狀態會即時更新。
-     - 流程狀態若顯示「待上傳」會出現 `?` 按鈕，點擊即可看到「APRS-IS 已有相同封包」「呼號冷卻中」等實際拒絕原因；即使被去重拒絕，封包摘要與 Flow 列都會標示 `APRS: <呼號>`，方便追蹤是哪個呼號被節流。
+     - 流程狀態若顯示「待上傳」會出現 `?` 按鈕，點擊即可看到「APRS-IS 已有相同封包」「本機冷卻時間內已上傳」等實際拒絕原因；即使被去重拒絕，封包摘要與 Flow 列都會標示 `APRS: <呼號>`，方便追蹤是哪個呼號被節流。
   5. **設定**：設定 Meshtastic Host、CallMesh API Key、APRS Server、信標間隔，並可切換是否啟用 Web UI。
      - 連線模式、主機欄位與 Serial 裝置現在具備 **即時套用**；修改後會透過 `scheduleConnectionApply()` 觸發重連，不需再按「連線」。
      - 「允許與 TenManMap 及合作夥伴分享資料」為預設開啟的低調開關；取消勾選時會呼叫 `savePreferences()` 與 `updateClientPreferences()`，進而更新 `CallMeshAprsBridge.setTenmanShareEnabled(false)`。
@@ -438,11 +448,11 @@ node src/index.js --host serial:///dev/ttyUSB0 --web-ui
 
 ### 6.4.1 APRS 偵錯
 
-- 任一執行中的 CLI / Electron / Web Dashboard 皆會掛載 `http://<host>:<port>/debug` 端點，回傳 JSON 內含 `relayLinkStats` 以及 `aprsDedup`；後者直接呼叫 `CallMeshAprsBridge.getAprsDebugSnapshot()`，可檢視 `allowedCallsigns`、`packetCache`（最近從 APRS-IS 收到的封包）、`localTxHistory`（本機送出的封包）、`callsignSummary`（呼號冷卻狀態）、`lastPositionDigest` 等欄位。
+- 任一執行中的 CLI / Electron / Web Dashboard 皆會掛載 `http://<host>:<port>/debug` 端點，回傳 JSON 內含 `relayLinkStats` 以及 `aprsDedup`；後者直接呼叫 `CallMeshAprsBridge.getAprsDebugSnapshot()`，可檢視 `allowedCallsigns`、`packetCache`（最近從 APRS-IS 收到的封包）、`localTxHistory`（本機送出的封包）、`callsignSummary`（呼號最近出現摘要）、`lastPositionDigest` 等欄位。
 - 若懷疑 APRS feed 沒回傳資料，可先查看 `/debug` → `aprsDedup.packetCache` 是否有任何條目，再檢查 `aprsDedup.aprsState.connected/loginVerified`、或查看 Log 分頁的 `[APRS] rx ...` 訊息（已解除靜音，會完整顯示 server 回傳內容）。
 - `TMAG_APRS_FEED_FILTER` 可覆寫預設範圍；若未設定，會依 CallMesh 下發的座標自動套用 `#filter r/<lat>/<lon>/300`（半徑 300 km）。若需要自訂，請直接填入完整 `#filter ...` 指令（或輸入 `none` 讓伺服器回到預設 m/2），調整後重啟流程並透過 `/debug` → `aprsDedup.packetCache` 驗證是否收到新呼號。
 - APRS Log 預設靜音（不再顯示大量 `rx/tx/keepalive` 行）。若需回復原本的詳細輸出，請設定 `TMAG_APRS_LOG_VERBOSE=1` 後重啟。
-- APRS 去重快取僅存在於記憶體：`packetCache` / `callsignSummary` 每 30 分鐘自動清除一次，`localTxHistory` 與 `lastPositionDigest` 則以 30 秒為窗口防止重複上傳。重啟程式或手動清除節點資料庫都會同時把這些快取清空，需要透過 `/debug` 即時檢視。
+- APRS 去重快取現在會同步寫入 `callmesh-data.sqlite`（`aprs_packet_cache` / `aprs_local_tx` / `aprs_callsign_summary` / `aprs_position_digest`），跨重啟仍會載回，但啟動時會重新套用 3 小時（`packetCache` / `callsignSummary`）與 30 秒（`localTxHistory`）的 TTL，舊資料會立即被修剪。清除資料或 `CALLMESH_ARTIFACTS_DIR` 時也會一併清空這些表。
 
 ### 6.5 訊息頻道
 
@@ -536,7 +546,7 @@ CallMeshAprsBridge ──► CallMesh API（Heartbeat / Provision / Mapping）
 
 - `CALLMESH_ARTIFACTS_DIR`（預設 `~/.config/callmesh/`）：
   - `monitor.json`：CallMesh API 驗證結果、心跳時間。
-  - `callmesh-data.sqlite`：集中儲存節點快照（`nodes` 表）、Mapping/Provision 快取（`kv_store`）、訊息紀錄（`message_log`）與 Relay 統計（`relay_stats`）。升級時會自動匯入舊版 `node-database.json`、`message-log.jsonl` 與 `relay-link-stats.json` 並移除備份。
+  - `callmesh-data.sqlite`：集中儲存節點快照（`nodes` 表）、Mapping/Provision 快取（`kv_store`）、訊息紀錄（`message_log`）與 Relay 統計（`relay_stats`），同時新增 `aprs_packet_cache` / `aprs_local_tx` / `aprs_callsign_summary` / `aprs_position_digest` 表持久化 APRS 去重快取，與 `aprs_backtrack_state` 持久化防回朔 Gate 的 last/prev/pending 狀態。升級時會自動匯入舊版 `node-database.json`、`message-log.jsonl` 與 `relay-link-stats.json` 並移除備份。
 - `telemetry-records.sqlite`：遙測資料。
 - WebDashboard Snapshots：啟動時會以 `seed*` 方法注入節點、遙測、訊息快照；重新整理頁面也會取得最新資料。
 
@@ -701,7 +711,7 @@ npx pkg src/index.js --targets node18-linux-x64
 | 遙測圖表沒有資料 | 確認選擇的時間區間內有紀錄；若僅存在歷史資料，請切換至符合的日/週/月/年或自訂時間，或使用 `scripts/fix-telemetry-timestamps.js` 將舊紀錄對齊收包時間。 |
 | Telemetry SQLite 長期成長 | 可定期備份 `telemetry-records.sqlite` 後透過 `VACUUM` 或清空指令縮減檔案大小，必要時調整 `telemetryMaxEntriesPerNode` 限制。 |
 | Chart.js 未載入 | 確保 `node_modules/chart.js/dist/chart.umd.js` 存在；若 `desktop` 包裝成可攜版，記得把整個 `node_modules/chart.js` 併入發佈資產。 |
-| 節點名稱仍顯示 MeshID | 確認 `node` / `node-snapshot` 事件是否正常送達；若 API Key 尚未驗證或節點尚未回報 `nodeInfo`，會暫時只顯示 MeshID。 |
+| 節點名稱仍顯示 MeshID | 確認 `node` / `node-snapshot` 事件是否正常送達；只要裝置送出 `NodeInfo`（例如在 App 點「Send Owner/Node Info」或重連）就會立即覆蓋舊的長/短名，若仍不更新可清除節點資料庫後再讓裝置重送。 |
 | 遙測統計未更新 | Bridge `telemetry` 事件未觸發或被攔截，可檢查 Renderer Console；統計資料由 Bridge 計算，前端僅顯示。 |
 
 ---
@@ -716,6 +726,7 @@ npx pkg src/index.js --targets node18-linux-x64
 ---
 ## 版本註記
 
+- **v0.2.27**：精簡 TMAG Relay WebSocket 相關 log（僅保留停用、缺 API Key、嘗試連線、已連線），同步更新版本號。
 - **v0.2.23**：遙測持久層改用 SQLite（`telemetry-records.sqlite`），啟動時自動匯入舊版 JSONL 並備份。
 - **v0.2.21**：恢復 TenManMap 位置 `extra` payload 與節點詳細欄位，避免既有整合收不到資料。
 - **v0.2.20**：精簡 TenManMap 上行資訊（位置僅保留必要欄位、節點同步改為 `node.snapshot`/`node.update`），預設不再顯示 ack 訊息。

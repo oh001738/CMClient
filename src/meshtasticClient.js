@@ -8,6 +8,7 @@ const path = require('path');
 const crypto = require('crypto');
 const fsPromises = require('fs/promises');
 const protobuf = require('protobufjs');
+const { getAppTimezone, formatTimestampLabel } = require('./timezone');
 
 const { unishox2_decompress_simple } = require('unishox2.siara.cc');
 const { nodeDatabase } = require('./nodeDatabase');
@@ -20,6 +21,7 @@ const BROADCAST_ADDR = 0xffffffff;
 const RELAY_GUESS_EXPLANATION =
   '最後轉發節點由 SNR/RSSI 推測（韌體僅提供節點尾碼），結果可能不完全準確。';
 const FORCED_OUTBOUND_HOP_LIMIT = 6;
+const APP_TIMEZONE = getAppTimezone();
 
 function normalizeMeshId(meshId) {
   if (meshId == null) return null;
@@ -178,6 +180,21 @@ class MeshtasticClient extends EventEmitter {
     return normalized.toLowerCase().startsWith('!abcd');
   }
 
+  _getNodeDatabaseRecord(meshId) {
+    if (!meshId) {
+      return null;
+    }
+    if (typeof nodeDatabase?.get !== 'function') {
+      return null;
+    }
+    try {
+      return nodeDatabase.get(meshId);
+    } catch (err) {
+      console.warn(`[relay-guess] nodeDatabase lookup failed: ${err.message}`);
+      return null;
+    }
+  }
+
   _normalizeRelayNode(relayNode, { snr = null, rssi = null } = {}) {
     const raw = Number(relayNode) >>> 0;
     // the firmware sets relay_node to the full node id, but in some cases only
@@ -214,12 +231,7 @@ class MeshtasticClient extends EventEmitter {
         return null;
       }
       const normalizedId = formatHexId(match >>> 0);
-      let hasNodeRecord = false;
-      try {
-        hasNodeRecord = Boolean(nodeDatabase?.get?.(normalizedId));
-      } catch {
-        hasNodeRecord = false;
-      }
+      const hasNodeRecord = Boolean(this._getNodeDatabaseRecord(normalizedId));
       const missingDbRecord = !hasNodeRecord;
       const guessed = isTruncatedId || missingDbRecord;
       const reasonParts = [];
@@ -240,16 +252,26 @@ class MeshtasticClient extends EventEmitter {
     }
     const candidates = Array.from(matches);
     const guessResult = this._guessRelayCandidate(candidates, { snr, rssi });
-    if (guessResult) {
-      if (guessResult.nodeId != null) {
-        this._recordRelayTailCandidate(guessResult.nodeId);
+      if (guessResult) {
+        if (guessResult.nodeId != null) {
+          this._recordRelayTailCandidate(guessResult.nodeId);
+        }
+        let forceTailLabel = Boolean(guessResult.forceTailLabel);
+        if (!forceTailLabel && guessResult.nodeId != null) {
+          const normalizedCandidate = formatHexId(guessResult.nodeId >>> 0);
+          const hasNodeRecord = Boolean(this._getNodeDatabaseRecord(normalizedCandidate));
+          if (isTruncatedId && !hasNodeRecord) {
+            forceTailLabel = true;
+          }
+        } else if (!forceTailLabel && isTruncatedId) {
+          forceTailLabel = true;
+        }
+        return {
+          ...guessResult,
+          tailNodeId: guessResult.tailNodeId ?? raw >>> 0,
+          forceTailLabel
+        };
       }
-      return {
-        ...guessResult,
-        tailNodeId: guessResult.tailNodeId ?? raw >>> 0,
-        forceTailLabel: guessResult.forceTailLabel || isTruncatedId
-      };
-    }
     if (matches.size > 1) {
       const suffix = raw.toString(16).padStart(2, '0').toUpperCase();
       const labels = this._describeRelayCandidates(candidates);
@@ -1973,25 +1995,32 @@ class MeshtasticClient extends EventEmitter {
       return { label: 'unknown', meshId: null, meshIdNormalized: null };
     }
     const num = nodeNum >>> 0;
-    const entry = this.nodeMap.get(num);
+    const entry = this.nodeMap.get(num) || null;
     const meshIdRaw = entry?.id || formatHexId(num);
     const normalizedMeshId = normalizeMeshId(meshIdRaw);
     const meshId = normalizedMeshId || meshIdRaw;
+    const dbRecord = this._getNodeDatabaseRecord(normalizedMeshId || meshId);
+    const resolvedLongName = entry?.longName ?? dbRecord?.longName ?? null;
+    const resolvedShortName = entry?.shortName ?? dbRecord?.shortName ?? null;
+    const resolvedHwModel = entry?.hwModel ?? dbRecord?.hwModel ?? null;
+    const resolvedRole = entry?.role ?? dbRecord?.role ?? null;
+    const resolvedMeshIdOriginal =
+      entry?.meshIdOriginal || entry?.id || dbRecord?.meshIdOriginal || meshIdRaw || null;
     const label =
       this._composeNodeLabel({
-        longName: entry?.longName,
-        shortName: entry?.shortName,
+        longName: resolvedLongName,
+        shortName: resolvedShortName,
         meshId
       }) || meshId || 'unknown';
     return {
       label,
       meshId,
       meshIdNormalized: normalizedMeshId || null,
-      meshIdOriginal: meshIdRaw || null,
-      shortName: entry?.shortName,
-      longName: entry?.longName,
-      hwModel: entry?.hwModel ?? null,
-      role: entry?.role ?? null,
+      meshIdOriginal: resolvedMeshIdOriginal,
+      shortName: resolvedShortName,
+      longName: resolvedLongName,
+      hwModel: resolvedHwModel,
+      role: resolvedRole,
       raw: num
     };
   }
@@ -2024,17 +2053,17 @@ class MeshtasticClient extends EventEmitter {
         targetNode.meshIdOriginal ?? meshIdCandidate ?? normalized;
     }
     const longName = sanitizeText(decodedNodeInfo.longName);
-    if (!targetNode.longName && longName) {
+    if (longName && longName !== targetNode.longName) {
       targetNode.longName = longName;
     }
     const shortName = sanitizeText(decodedNodeInfo.shortName);
-    if (!targetNode.shortName && shortName) {
+    if (shortName && shortName !== targetNode.shortName) {
       targetNode.shortName = shortName;
     }
-    if (targetNode.hwModel == null && decodedNodeInfo.hwModel != null) {
+    if (decodedNodeInfo.hwModel != null && targetNode.hwModel !== decodedNodeInfo.hwModel) {
       targetNode.hwModel = decodedNodeInfo.hwModel;
     }
-    if (targetNode.role == null && decodedNodeInfo.role != null) {
+    if (decodedNodeInfo.role != null && targetNode.role !== decodedNodeInfo.role) {
       targetNode.role = decodedNodeInfo.role;
     }
     const recomputedLabel = this._composeNodeLabel({
@@ -2044,6 +2073,19 @@ class MeshtasticClient extends EventEmitter {
     });
     if (recomputedLabel) {
       targetNode.label = recomputedLabel;
+    }
+    if (Number.isFinite(targetNode.raw)) {
+      const rawId = targetNode.raw >>> 0;
+      const existing = this.nodeMap.get(rawId) || {};
+      this.nodeMap.set(rawId, {
+        ...existing,
+        id: targetNode.meshIdOriginal || existing.id || formatHexId(rawId),
+        meshIdOriginal: targetNode.meshIdOriginal ?? existing.meshIdOriginal ?? null,
+        shortName: targetNode.shortName ?? existing.shortName ?? null,
+        longName: targetNode.longName ?? existing.longName ?? null,
+        hwModel: targetNode.hwModel ?? existing.hwModel ?? null,
+        role: targetNode.role ?? existing.role ?? null
+      });
     }
   }
 
@@ -2145,6 +2187,7 @@ class MeshtasticClient extends EventEmitter {
     });
     const encoded = this.toRadioType.encode(message).finish();
     const framed = framePacket(encoded);
+    this.emit('toRadioRaw', framed);
     return new Promise((resolve, reject) => {
       this._writeFrame(framed, (err) => {
         if (err) {
@@ -2170,6 +2213,7 @@ class MeshtasticClient extends EventEmitter {
     const message = this.toRadioType.create({ wantConfigId: nonce });
     const encoded = this.toRadioType.encode(message).finish();
     const framed = framePacket(encoded);
+    this.emit('toRadioRaw', framed);
     this._writeFrame(framed, (err) => {
       if (err) {
         this.emit('error', new Error(`want_config 傳送失敗: ${err.message}`));
@@ -2200,6 +2244,7 @@ class MeshtasticClient extends EventEmitter {
     const message = this.toRadioType.create({ heartbeat: {} });
     const encoded = this.toRadioType.encode(message).finish();
     const framed = framePacket(encoded);
+    this.emit('toRadioRaw', framed);
     this._writeFrame(framed, (err) => {
       if (err) {
         this.emit('error', new Error(`heartbeat 傳送失敗: ${err.message}`));
@@ -2332,12 +2377,11 @@ function formatRelativeAge(ms) {
 }
 
 function formatTimestamp(date) {
-  const mm = String(date.getMonth() + 1).padStart(2, '0');
-  const dd = String(date.getDate()).padStart(2, '0');
-  const hh = String(date.getHours()).padStart(2, '0');
-  const mi = String(date.getMinutes()).padStart(2, '0');
-  const ss = String(date.getSeconds()).padStart(2, '0');
-  return `${mm}/${dd} ${hh}:${mi}:${ss}`;
+  return (
+    formatTimestampLabel(date, { timeZone: APP_TIMEZONE }) ||
+    formatTimestampLabel(date, { timeZone: 'UTC' }) ||
+    ''
+  );
 }
 
 function formatHops(hopLimit, hopStart) {

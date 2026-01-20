@@ -44,22 +44,23 @@ const APRS_LOG_VERBOSE =
   ['1', 'true', 'yes', 'on'].includes(
     String(process.env.TMAG_APRS_LOG_VERBOSE || '').trim().toLowerCase()
   );
-const APRS_PACKET_CACHE_TTL_MS = 30 * 60_000;
-const APRS_PACKET_RECENT_WINDOW_MS = 30 * 60_000;
+const APRS_PACKET_CACHE_TTL_MS = 3 * 60 * 60_000;
+const APRS_PACKET_RECENT_WINDOW_MS = APRS_PACKET_CACHE_TTL_MS;
 const APRS_LOCAL_TX_WINDOW_MS = 30_000;
-const APRS_DELAY_SUPPRESS_DEFAULT_MS = 10_000;
-const APRS_CALLSIGN_RECENT_SUPPRESS_MS = (() => {
-  const raw = process.env.TMAG_APRS_DELAY_WINDOW_MS;
-  if (raw === undefined || raw === null || raw === '') {
-    return APRS_DELAY_SUPPRESS_DEFAULT_MS;
-  }
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed)) {
-    return APRS_DELAY_SUPPRESS_DEFAULT_MS;
-  }
-  return Math.max(0, Math.floor(parsed));
-})();
 const APRS_PACKET_KEY_SEPARATOR = '\u0001';
+
+const APRS_ANTI_BACKTRACK_MAX_SPEED_CAR_KMPH = 200;
+const APRS_ANTI_BACKTRACK_MAX_SPEED_HSR_KMPH = 380;
+const APRS_ANTI_BACKTRACK_ENTER_HSR_KMPH = 240;
+const APRS_ANTI_BACKTRACK_EXIT_HSR_KMPH = 180;
+const APRS_ANTI_BACKTRACK_CONFIRM_RADIUS_KM = 8;
+const APRS_ANTI_BACKTRACK_CONFIRM_WINDOW_MS = 5 * 60_000;
+const APRS_ANTI_BACKTRACK_PENDING_TIMEOUT_MS = 20 * 60_000;
+const APRS_ANTI_BACKTRACK_MIN_DT_MS = 10_000;
+const APRS_ANTI_BACKTRACK_CLUSTER_SIZE = 5;
+const APRS_ANTI_BACKTRACK_CLUSTER_RADIUS_KM = 12;
+const APRS_ANTI_BACKTRACK_LONG_GAP_RESET_MS = 2 * 60 * 60_000;
+const APRS_ANTI_BACKTRACK_STATE_LIMIT = 512;
 
 const TENMAN_FORWARD_WS_ENDPOINT = 'wss://tenmanmap.yakumo.tw/ws';
 const TENMAN_FORWARD_DEFAULT_ENABLED =
@@ -69,6 +70,7 @@ const TENMAN_FORWARD_DEFAULT_ENABLED =
 const TENMAN_FORWARD_TIMEZONE_OFFSET_MINUTES = 8 * 60;
 const TENMAN_FORWARD_QUEUE_LIMIT = 64;
 const TENMAN_FORWARD_RECONNECT_DELAY_MS = 5000;
+const { getAppTimezone, formatTimestampLabel: formatTimestampLabelWithTimezone } = require('../timezone');
 const TENMAN_FORWARD_AUTH_ACTION = 'authenticate';
 const TENMAN_FORWARD_SUPPRESS_ACK = ['1', 'true', 'yes', 'on'].includes(
   String(process.env.TENMAN_SUPPRESS_ACK ?? 'true').trim().toLowerCase()
@@ -78,13 +80,21 @@ const TENMAN_FORWARD_VERBOSE_LOG = ['1', 'true', 'yes', 'on'].includes(
 );
 const TENMAN_INBOUND_MIN_INTERVAL_MS = 5000;
 const TENMAN_FORWARD_NODE_UPDATE_BUCKET_MS = 30_000;
+const TMAG_RELAY_WS_ENDPOINT = process.env.TMAG_RELAY_ENDPOINT || 'wss://relay.tmmarc.org/';
+const TMAG_RELAY_QUEUE_LIMIT = 256;
+const TMAG_RELAY_RECONNECT_BASE_MS = 3_000;
+const TMAG_RELAY_RECONNECT_MAX_MS = 30_000;
 const MESHTASTIC_BROADCAST_ADDR = 0xffffffff;
+const APP_TIMEZONE = getAppTimezone();
 
 const PROTO_DIR = path.resolve(__dirname, '..', '..', 'proto');
 
 function formatTimestampLabel(date) {
-  const pad = (value) => String(value).padStart(2, '0');
-  return `${pad(date.getMonth() + 1)}/${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+  return (
+    formatTimestampLabelWithTimezone(date, { timeZone: APP_TIMEZONE }) ||
+    formatTimestampLabelWithTimezone(date, { timeZone: 'UTC' }) ||
+    ''
+  );
 }
 
 function extractEnumBlock(source, enumName) {
@@ -253,6 +263,9 @@ class CallMeshAprsBridge extends EventEmitter {
     this.aprsPacketCache = new Map();
     this.aprsCallsignSummary = new Map();
     this.aprsLocalTxHistory = new Map();
+    this.aprsAntiBacktrackState = new Map();
+    this.aprsCachePersistTimer = null;
+    this.aprsCachePersistDelayMs = 1500;
     this.aprsFeedFilterCommand = this.computeAprsFeedFilterCommand();
     this.aprsVerboseLog = APRS_LOG_VERBOSE;
     this.nodeDatabase = nodeDatabase;
@@ -310,6 +323,14 @@ class CallMeshAprsBridge extends EventEmitter {
     };
     this.tenmanInboundState = {
       lastAcceptedAt: 0
+    };
+    this.tmagRelayState = {
+      websocket: null,
+      connecting: false,
+      reconnectTimer: null,
+      queue: [],
+      disabledLogged: false,
+      missingApiKeyLogged: false
     };
 
     this.meshtasticClients = new Set();
@@ -468,6 +489,9 @@ class CallMeshAprsBridge extends EventEmitter {
     await this.initializeTelemetryDatabase({ migrateLegacy: allowRestore });
     await this.loadTelemetryStore();
     await this.restoreNodeDatabase();
+    if (allowRestore) {
+      this.restoreAprsDedupCaches();
+    }
     this.emitState();
   }
 
@@ -631,6 +655,191 @@ class CallMeshAprsBridge extends EventEmitter {
     }
   }
 
+  restoreAprsDedupCaches() {
+    const store = this.getDataStore();
+    if (!store) {
+      return;
+    }
+    let snapshot = null;
+    try {
+      snapshot = store.loadAprsDedupSnapshot();
+    } catch (err) {
+      this.emitLog('APRS', `restore aprs dedup snapshot failed: ${err.message}`);
+      return;
+    }
+    if (!snapshot) {
+      return;
+    }
+    const now = Date.now();
+    const packetTtl = APRS_PACKET_CACHE_TTL_MS;
+    const localTxTtl = APRS_LOCAL_TX_WINDOW_MS;
+    let restoredPackets = 0;
+    let restoredLocalTx = 0;
+    let restoredCallsigns = 0;
+    let restoredDigests = 0;
+
+    if (Array.isArray(snapshot.packetCache)) {
+      this.aprsPacketCache.clear();
+      for (const entry of snapshot.packetCache) {
+        const key = typeof entry?.packetKey === 'string' ? entry.packetKey : entry?.key;
+        const seenAt = Number(entry?.lastSeenMs ?? entry?.lastSeen);
+        if (typeof key !== 'string' || !Number.isFinite(seenAt)) continue;
+        if (now - seenAt > packetTtl) continue;
+        this.aprsPacketCache.set(key, seenAt);
+        restoredPackets += 1;
+      }
+    }
+
+    if (Array.isArray(snapshot.localTxHistory)) {
+      this.aprsLocalTxHistory.clear();
+      for (const entry of snapshot.localTxHistory) {
+        const key = typeof entry?.packetKey === 'string' ? entry.packetKey : entry?.key;
+        const seenAt = Number(entry?.lastSeenMs ?? entry?.lastSeen);
+        if (typeof key !== 'string' || !Number.isFinite(seenAt)) continue;
+        if (now - seenAt > localTxTtl) continue;
+        this.aprsLocalTxHistory.set(key, seenAt);
+        restoredLocalTx += 1;
+      }
+    }
+
+    if (Array.isArray(snapshot.callsignSummary)) {
+      this.aprsCallsignSummary.clear();
+      for (const entry of snapshot.callsignSummary) {
+        const callsign = normalizeAprsCallsign(entry?.callsign ?? entry?.callSign);
+        if (!callsign) continue;
+        const seenAt = Number(entry?.lastSeenMs ?? entry?.lastSeen);
+        if (Number.isFinite(seenAt) && now - seenAt > packetTtl) {
+          continue;
+        }
+        const lastInfo =
+          entry?.lastInfo === undefined || entry?.lastInfo === null
+            ? null
+            : String(entry.lastInfo);
+        this.aprsCallsignSummary.set(callsign, {
+          lastSeen: Number.isFinite(seenAt) ? seenAt : null,
+          lastInfo
+        });
+        restoredCallsigns += 1;
+      }
+    }
+
+    if (Array.isArray(snapshot.positionDigest)) {
+      this.aprsLastPositionDigest.clear();
+      for (const entry of snapshot.positionDigest) {
+        const meshId = normalizeMeshId(entry?.meshId ?? entry?.mesh_id);
+        if (!meshId) continue;
+        const digest = typeof entry?.digest === 'string' ? entry.digest : null;
+        const timestampMs = Number(entry?.timestampMs ?? entry?.timestamp);
+        this.aprsLastPositionDigest.set(meshId, {
+          digest,
+          timestamp: Number.isFinite(timestampMs) ? timestampMs : null
+        });
+        restoredDigests += 1;
+        if (this.aprsLastPositionDigest.size > APRS_POSITION_CACHE_LIMIT) {
+          break;
+        }
+      }
+    }
+
+    if (restoredPackets || restoredLocalTx || restoredCallsigns || restoredDigests) {
+      this.emitLog(
+        'APRS',
+        `restored aprs dedup snapshot packet=${restoredPackets} local_tx=${restoredLocalTx} callsign=${restoredCallsigns} digest=${restoredDigests}`
+      );
+    }
+    this.restoreAprsAntiBacktrackState(now);
+    this.pruneAprsCachesByWhitelist('restore');
+    this.scheduleAprsCachePersist();
+  }
+
+  restoreAprsAntiBacktrackState(now = Date.now()) {
+    const store = this.getDataStore();
+    if (!store) {
+      return;
+    }
+    let rows = null;
+    try {
+      rows = store.loadAprsBacktrackState();
+    } catch (err) {
+      this.emitLog('APRS', `restore aprs anti-backtrack state failed: ${err.message}`);
+      return;
+    }
+    if (!Array.isArray(rows) || !rows.length) {
+      return;
+    }
+    let restored = 0;
+    let pendingCount = 0;
+    for (const entry of rows) {
+      const callsign = normalizeAprsCallsign(entry?.callsign);
+      if (!callsign) continue;
+      const state = this.getAprsAntiBacktrackState(callsign, { allowCreate: true });
+      if (!state) continue;
+      state.mode = entry?.mode === 'hsr' ? 'hsr' : 'car';
+      state.modeUpdatedMs = Number.isFinite(entry?.modeUpdatedMs) ? entry.modeUpdatedMs : null;
+
+      const last = entry?.lastUploaded;
+      if (last && Number.isFinite(last.lat) && Number.isFinite(last.lon)) {
+        state.lastUploaded = {
+          lat: Number(last.lat),
+          lon: Number(last.lon),
+          timestampMs: Number.isFinite(last.timestampMs) ? Number(last.timestampMs) : null
+        };
+      }
+
+      const prev = entry?.prevUploaded;
+      if (prev && Number.isFinite(prev.lat) && Number.isFinite(prev.lon)) {
+        state.prevUploaded = {
+          lat: Number(prev.lat),
+          lon: Number(prev.lon),
+          timestampMs: Number.isFinite(prev.timestampMs) ? Number(prev.timestampMs) : null
+        };
+      }
+
+      const pending = entry?.pending;
+      if (pending && Number.isFinite(pending.lat) && Number.isFinite(pending.lon)) {
+        const firstSeen = Number.isFinite(entry?.pendingFirstSeenMs)
+          ? Number(entry.pendingFirstSeenMs)
+          : null;
+        const lastSeen = Number.isFinite(entry?.pendingLastSeenMs)
+          ? Number(entry.pendingLastSeenMs)
+          : null;
+        if (!firstSeen || now - firstSeen <= APRS_ANTI_BACKTRACK_PENDING_TIMEOUT_MS) {
+          state.pending = {
+            lat: Number(pending.lat),
+            lon: Number(pending.lon),
+            firstSeenMs: firstSeen,
+            lastSeenMs: lastSeen || firstSeen,
+            reason: entry?.pendingReason || null
+          };
+          pendingCount += 1;
+        }
+      }
+
+      const history = Array.isArray(entry?.history) ? entry.history : [];
+      state.history = history
+        .filter(
+          (pos) =>
+            pos &&
+            Number.isFinite(pos.lat) &&
+            Number.isFinite(pos.lon) &&
+            Number.isFinite(pos.timestampMs)
+        )
+        .slice(-APRS_ANTI_BACKTRACK_CLUSTER_SIZE)
+        .map((pos) => ({
+          lat: Number(pos.lat),
+          lon: Number(pos.lon),
+          timestampMs: Number(pos.timestampMs)
+        }));
+      restored += 1;
+    }
+    if (restored) {
+      this.emitLog(
+        'APRS',
+        `restored aprs anti-backtrack state count=${restored} pending=${pendingCount}`
+      );
+    }
+  }
+
   scheduleNodeDatabasePersist() {
     if (!this.storageDir) {
       return;
@@ -702,6 +911,449 @@ class CallMeshAprsBridge extends EventEmitter {
       maybePromise.catch((err) => {
         console.error('寫入節點資料庫失敗:', err);
       });
+    }
+  }
+
+  scheduleAprsCachePersist() {
+    if (!this.storageDir) {
+      return;
+    }
+    if (this.aprsCachePersistTimer) {
+      return;
+    }
+    this.aprsCachePersistTimer = setTimeout(() => {
+      this.aprsCachePersistTimer = null;
+      try {
+        this.persistAprsCaches();
+      } catch (err) {
+        this.emitLog('APRS', `persist aprs dedup snapshot failed: ${err.message}`);
+      }
+    }, this.aprsCachePersistDelayMs);
+    this.aprsCachePersistTimer.unref?.();
+  }
+
+  cancelAprsCachePersist() {
+    if (this.aprsCachePersistTimer) {
+      clearTimeout(this.aprsCachePersistTimer);
+      this.aprsCachePersistTimer = null;
+    }
+  }
+
+  persistAprsCaches() {
+    if (!this.storageDir) {
+      return;
+    }
+    const store = this.getDataStore();
+    if (!store) {
+      return;
+    }
+    try {
+      const snapshot = this.buildAprsDedupSnapshot();
+      store.saveAprsDedupSnapshot(snapshot);
+      const backtrackSnapshot = this.buildAprsAntiBacktrackSnapshot();
+      store.saveAprsBacktrackState(backtrackSnapshot);
+    } catch (err) {
+      this.emitLog('APRS', `寫入 APRS 去重快取失敗: ${err.message}`);
+    }
+  }
+
+  flushAprsCachePersistSync() {
+    if (!this.storageDir) {
+      return;
+    }
+    this.cancelAprsCachePersist();
+    try {
+      this.persistAprsCaches();
+    } catch (err) {
+      this.emitLog('APRS', `同步寫入 APRS 去重快取失敗: ${err.message}`);
+    }
+  }
+
+  buildAprsDedupSnapshot() {
+    const packetCache = [];
+    for (const [key, lastSeenMs] of this.aprsPacketCache.entries()) {
+      if (typeof key !== 'string' || !Number.isFinite(lastSeenMs)) continue;
+      const { callsign, infoString } = splitAprsPacketKey(key);
+      packetCache.push({
+        packetKey: key,
+        callsign,
+        infoString,
+        lastSeenMs: Math.floor(lastSeenMs)
+      });
+    }
+
+    const localTxHistory = [];
+    for (const [key, lastSeenMs] of this.aprsLocalTxHistory.entries()) {
+      if (typeof key !== 'string' || !Number.isFinite(lastSeenMs)) continue;
+      const { callsign, infoString } = splitAprsPacketKey(key);
+      localTxHistory.push({
+        packetKey: key,
+        callsign,
+        infoString,
+        lastSeenMs: Math.floor(lastSeenMs)
+      });
+    }
+
+    const callsignSummary = [];
+    for (const [callsign, summary] of this.aprsCallsignSummary.entries()) {
+      const normalized = normalizeAprsCallsign(callsign);
+      if (!normalized) continue;
+      const lastSeen = Number.isFinite(summary?.lastSeen) ? Math.floor(summary.lastSeen) : null;
+      const lastInfo =
+        summary?.lastInfo === undefined || summary?.lastInfo === null
+          ? null
+          : String(summary.lastInfo);
+      callsignSummary.push({
+        callsign: normalized,
+        lastSeenMs: lastSeen,
+        lastInfo
+      });
+    }
+
+    const positionDigest = [];
+    for (const [meshId, entry] of this.aprsLastPositionDigest.entries()) {
+      const normalizedMeshId = normalizeMeshId(meshId);
+      if (!normalizedMeshId) continue;
+      positionDigest.push({
+        meshId: normalizedMeshId,
+        digest: entry?.digest ?? null,
+        timestampMs: Number.isFinite(entry?.timestamp) ? Math.floor(entry.timestamp) : null
+      });
+    }
+
+    return {
+      packetCache,
+      localTxHistory,
+      callsignSummary,
+      positionDigest
+    };
+  }
+
+  buildAprsAntiBacktrackSnapshot() {
+    const entries = [];
+    for (const [callsign, state] of this.aprsAntiBacktrackState.entries()) {
+      if (!callsign || !state) continue;
+      entries.push({
+        callsign,
+        lastUploaded: state.lastUploaded
+          ? {
+              lat: state.lastUploaded.lat,
+              lon: state.lastUploaded.lon,
+              timestampMs: state.lastUploaded.timestampMs
+            }
+          : null,
+        prevUploaded: state.prevUploaded
+          ? {
+              lat: state.prevUploaded.lat,
+              lon: state.prevUploaded.lon,
+              timestampMs: state.prevUploaded.timestampMs
+            }
+          : null,
+        pending: state.pending
+          ? {
+              lat: state.pending.lat,
+              lon: state.pending.lon,
+              timestampMs: state.pending.lastSeenMs ?? state.pending.firstSeenMs
+            }
+          : null,
+        pendingFirstSeenMs: state.pending?.firstSeenMs ?? null,
+        pendingReason: state.pending?.reason ?? null,
+        pendingLastSeenMs: state.pending?.lastSeenMs ?? null,
+        mode: state.mode ?? null,
+        modeUpdatedMs: state.modeUpdatedMs ?? null,
+        history: Array.isArray(state.history) ? state.history.slice() : []
+      });
+    }
+    return entries;
+  }
+
+  getAprsAntiBacktrackState(callsign, { allowCreate = false } = {}) {
+    const normalized = normalizeAprsCallsign(callsign);
+    if (!normalized) return null;
+    let state = this.aprsAntiBacktrackState.get(normalized);
+    if (!state && allowCreate) {
+      let trimmed = false;
+      if (this.aprsAntiBacktrackState.size >= APRS_ANTI_BACKTRACK_STATE_LIMIT) {
+        const firstKey = this.aprsAntiBacktrackState.keys().next().value;
+        if (firstKey) {
+          this.aprsAntiBacktrackState.delete(firstKey);
+          trimmed = true;
+        }
+      }
+      state = {
+        mode: 'car',
+        modeUpdatedMs: null,
+        lastUploaded: null,
+        prevUploaded: null,
+        pending: null,
+        history: []
+      };
+      this.aprsAntiBacktrackState.set(normalized, state);
+      if (trimmed) {
+        this.scheduleAprsCachePersist();
+      }
+    }
+    return state;
+  }
+
+  pruneAprsAntiBacktrackPending(state, now) {
+    if (!state?.pending || !Number.isFinite(state.pending.firstSeenMs)) {
+      return false;
+    }
+    if (now - state.pending.firstSeenMs > APRS_ANTI_BACKTRACK_PENDING_TIMEOUT_MS) {
+      state.pending = null;
+      return true;
+    }
+    return false;
+  }
+
+  computeAprsAntiBacktrackClusterDistance(state, pos) {
+    if (!state || !Array.isArray(state.history) || !state.history.length) {
+      return null;
+    }
+    const recent = state.history
+      .filter(
+        (entry) =>
+          entry &&
+          Number.isFinite(entry.lat) &&
+          Number.isFinite(entry.lon) &&
+          Number.isFinite(entry.timestampMs)
+      )
+      .slice(-APRS_ANTI_BACKTRACK_CLUSTER_SIZE);
+    if (!recent.length) {
+      return null;
+    }
+    const sum = recent.reduce(
+      (acc, entry) => {
+        acc.lat += entry.lat;
+        acc.lon += entry.lon;
+        return acc;
+      },
+      { lat: 0, lon: 0 }
+    );
+    const center = {
+      lat: sum.lat / recent.length,
+      lon: sum.lon / recent.length
+    };
+    return haversineKm(center.lat, center.lon, pos.latitude, pos.longitude);
+  }
+
+  handleAprsAntiBacktrackPending(state, pos, now, context) {
+    const pending = state.pending;
+    const result = {
+      decision: 'hold',
+      reason: context?.reason ?? 'unknown',
+      distKm: context?.distKm ?? null,
+      dtMs: context?.dtMs ?? null,
+      speedKph: context?.speedKph ?? null,
+      clusterDistanceKm: context?.clusterDistanceKm ?? null,
+      mode: state.mode || 'car',
+      pendingReason: null,
+      pendingDistanceKm: null,
+      pendingAgeMs: null,
+      changed: false
+    };
+    if (pending) {
+      const pendingAge = Number.isFinite(pending.firstSeenMs) ? now - pending.firstSeenMs : null;
+      const distanceToPending = haversineKm(
+        pending.lat,
+        pending.lon,
+        pos.latitude,
+        pos.longitude
+      );
+      result.pendingDistanceKm = distanceToPending;
+      result.pendingAgeMs = pendingAge;
+      if (
+        Number.isFinite(distanceToPending) &&
+        distanceToPending <= APRS_ANTI_BACKTRACK_CONFIRM_RADIUS_KM &&
+        (!Number.isFinite(pendingAge) || pendingAge <= APRS_ANTI_BACKTRACK_CONFIRM_WINDOW_MS)
+      ) {
+        result.decision = 'upload';
+        result.reason = 'pending-confirmed';
+        result.pendingReason = pending.reason || context?.reason || null;
+        return result;
+      }
+      const expired =
+        Number.isFinite(pendingAge) && pendingAge > APRS_ANTI_BACKTRACK_CONFIRM_WINDOW_MS;
+      state.pending = {
+        lat: pos.latitude,
+        lon: pos.longitude,
+        firstSeenMs: expired || !Number.isFinite(pending.firstSeenMs)
+          ? now
+          : pending.firstSeenMs,
+        lastSeenMs: now,
+        reason: pending.reason || context?.reason || null
+      };
+      result.changed = true;
+      return result;
+    }
+    state.pending = {
+      lat: pos.latitude,
+      lon: pos.longitude,
+      firstSeenMs: now,
+      lastSeenMs: now,
+      reason: context?.reason || null
+    };
+    result.pendingAgeMs = 0;
+    result.changed = true;
+    return result;
+  }
+
+  evaluateAprsAntiBacktrackGate(callsign, pos, now = Date.now()) {
+    const label = normalizeAprsCallsign(callsign) || callsign;
+    const state = this.getAprsAntiBacktrackState(callsign, { allowCreate: true });
+    if (!state) {
+      return { decision: 'upload', reason: 'missing-state' };
+    }
+    let changed = this.pruneAprsAntiBacktrackPending(state, now);
+    if (changed) {
+      this.emitLog('APRS', `anti-backtrack pending timeout callsign=${label}`);
+    }
+    const last = state.lastUploaded;
+    if (!last || !Number.isFinite(last.lat) || !Number.isFinite(last.lon)) {
+      if (changed) {
+        this.scheduleAprsCachePersist();
+      }
+      return { decision: 'upload', reason: 'first-fix', mode: state.mode || 'car' };
+    }
+    const dtMs = now - (last.timestampMs ?? now);
+    if (dtMs >= APRS_ANTI_BACKTRACK_LONG_GAP_RESET_MS) {
+      if (state.pending) {
+        state.pending = null;
+        changed = true;
+      }
+      if (changed) {
+        this.scheduleAprsCachePersist();
+      }
+      return { decision: 'upload', reason: 'long-gap', mode: state.mode || 'car', dtMs };
+    }
+    const distKm = haversineKm(last.lat, last.lon, pos.latitude, pos.longitude);
+    const speedKph = dtMs > 0 ? distKm / (dtMs / 3_600_000) : Infinity;
+    const vmax =
+      state.mode === 'hsr'
+        ? APRS_ANTI_BACKTRACK_MAX_SPEED_HSR_KMPH
+        : APRS_ANTI_BACKTRACK_MAX_SPEED_CAR_KMPH;
+    const clusterDistanceKm = this.computeAprsAntiBacktrackClusterDistance(state, pos);
+    let outlierReason = null;
+    if (dtMs < APRS_ANTI_BACKTRACK_MIN_DT_MS) {
+      outlierReason = 'dt-too-small';
+    } else if (speedKph > vmax) {
+      outlierReason = 'speed-exceeded';
+    } else if (
+      Number.isFinite(clusterDistanceKm) &&
+      clusterDistanceKm > APRS_ANTI_BACKTRACK_CLUSTER_RADIUS_KM
+    ) {
+      outlierReason = 'far-from-cluster';
+    }
+
+    if (outlierReason) {
+      const pendingDecision = this.handleAprsAntiBacktrackPending(state, pos, now, {
+        reason: outlierReason,
+        distKm,
+        dtMs,
+        speedKph,
+        clusterDistanceKm
+      });
+      if (pendingDecision.changed) {
+        this.scheduleAprsCachePersist();
+      }
+      return pendingDecision;
+    }
+
+    if (state.pending) {
+      state.pending = null;
+      changed = true;
+    }
+    if (changed) {
+      this.scheduleAprsCachePersist();
+    }
+    return {
+      decision: 'upload',
+      reason: 'pass',
+      distKm,
+      dtMs,
+      speedKph,
+      clusterDistanceKm,
+      mode: state.mode || 'car'
+    };
+  }
+
+  appendAprsAntiBacktrackHistory(state, pos) {
+    if (!state || !pos) return;
+    if (!Array.isArray(state.history)) {
+      state.history = [];
+    }
+    state.history.push({
+      lat: pos.lat,
+      lon: pos.lon,
+      timestampMs: pos.timestampMs
+    });
+    if (state.history.length > APRS_ANTI_BACKTRACK_CLUSTER_SIZE) {
+      state.history = state.history.slice(-APRS_ANTI_BACKTRACK_CLUSTER_SIZE);
+    }
+  }
+
+  updateAprsAntiBacktrackMode(state, previousLast, currentLast, now) {
+    if (!state || !previousLast || !currentLast) {
+      return;
+    }
+    if (!Number.isFinite(previousLast.timestampMs)) {
+      return;
+    }
+    const dtMs = now - previousLast.timestampMs;
+    if (dtMs <= 0) {
+      return;
+    }
+    const distKm = haversineKm(previousLast.lat, previousLast.lon, currentLast.lat, currentLast.lon);
+    const speedKph = distKm / (dtMs / 3_600_000);
+    if (state.mode === 'hsr') {
+      if (speedKph < APRS_ANTI_BACKTRACK_EXIT_HSR_KMPH) {
+        state.mode = 'car';
+        state.modeUpdatedMs = now;
+      }
+    } else if (speedKph > APRS_ANTI_BACKTRACK_ENTER_HSR_KMPH) {
+      state.mode = 'hsr';
+      state.modeUpdatedMs = now;
+    }
+  }
+
+  applyAprsAntiBacktrackUpload(callsign, pos, now, _context = {}) {
+    const state = this.getAprsAntiBacktrackState(callsign, { allowCreate: true });
+    if (!state) return;
+    const previousLast = state.lastUploaded
+      ? { ...state.lastUploaded }
+      : null;
+    if (previousLast) {
+      state.prevUploaded = previousLast;
+    }
+    state.lastUploaded = {
+      lat: pos.latitude,
+      lon: pos.longitude,
+      timestampMs: now
+    };
+    state.pending = null;
+    this.appendAprsAntiBacktrackHistory(state, state.lastUploaded);
+    this.updateAprsAntiBacktrackMode(state, previousLast, state.lastUploaded, now);
+    this.scheduleAprsCachePersist();
+  }
+
+  formatAprsAntiBacktrackHoldMessage(decision) {
+    const mode = decision?.mode === 'hsr' ? 'hsr' : 'car';
+    const vmax =
+      mode === 'hsr'
+        ? APRS_ANTI_BACKTRACK_MAX_SPEED_HSR_KMPH
+        : APRS_ANTI_BACKTRACK_MAX_SPEED_CAR_KMPH;
+    switch (decision?.reason) {
+      case 'dt-too-small':
+        return `APRS 防回朔暫緩：與前一筆時間差過小（< ${Math.round(
+          APRS_ANTI_BACKTRACK_MIN_DT_MS / 1000
+        )} 秒），等待下一筆確認`;
+      case 'speed-exceeded':
+        return `APRS 防回朔暫緩：推算速度超過上限 ${vmax} km/h，需第二筆確認`;
+      case 'far-from-cluster':
+        return `APRS 防回朔暫緩：位置偏離近期軌跡超過 ${APRS_ANTI_BACKTRACK_CLUSTER_RADIUS_KM} km`;
+      default:
+        return 'APRS 防回朔暫緩：等待二次確認';
     }
   }
 
@@ -1050,6 +1702,7 @@ class CallMeshAprsBridge extends EventEmitter {
         store.clearNodes();
         store.saveMessageLog([]);
         store.replaceRelayStats([]);
+        store.saveAprsDedupSnapshot({});
       } catch (err) {
         this.emitLog('CALLMESH', `clear sqlite artifacts failed: ${err.message}`);
       }
@@ -1080,6 +1733,7 @@ class CallMeshAprsBridge extends EventEmitter {
     await this.clearTelemetryStore({ silent: false });
     this.emitLog('CALLMESH', 'cleared local mapping/provision cache');
     this.updateAprsProvision(null);
+    this.scheduleAprsCachePersist();
   }
 
   async restoreTelemetryState() {
@@ -2276,6 +2930,8 @@ class CallMeshAprsBridge extends EventEmitter {
       this.tenmanForwardState.disabledLogged = false;
       this.emitLog('TENMAN', 'TenManMap 轉發已停用');
       this.resetTenmanWebsocket();
+      this.tmagRelayState.queue = [];
+      this.resetTmagRelayWebsocket();
       return false;
     }
     this.tenmanForwardState.disabledLogged = false;
@@ -2284,7 +2940,160 @@ class CallMeshAprsBridge extends EventEmitter {
     this.requestTenmanNodeSnapshot('share-enabled');
     this.ensureTenmanWebsocket();
     this.flushTenmanQueue();
+    this.ensureTmagRelayWebsocket();
+    this.flushTmagRelayQueue();
     return true;
+  }
+
+  isTmagRelayEnabled() {
+    return this.isTenmanForwardEnabled();
+  }
+
+  ensureTmagRelayWebsocket() {
+    const state = this.tmagRelayState;
+    if (!state || !this.isTmagRelayEnabled()) {
+      if (state && !state.disabledLogged) {
+        state.disabledLogged = true;
+        this.emitLog('TMAG-RELAY', '官方收集器轉發已停用');
+      }
+      return;
+    }
+    state.disabledLogged = false;
+
+    if (!this.callmeshState?.apiKey || !this.callmeshState?.verified) {
+      if (!state.missingApiKeyLogged) {
+        state.missingApiKeyLogged = true;
+        this.emitLog('TMAG-RELAY', '缺少已驗證的 API Key，跳過連線');
+      }
+      return;
+    }
+    state.missingApiKeyLogged = false;
+
+    if (state.websocket && state.websocket.readyState === WebSocket.OPEN) {
+      return;
+    }
+    if (state.connecting) {
+      return;
+    }
+    if (state.reconnectTimer) {
+      return;
+    }
+    state.connecting = true;
+    this.emitTenmanLog('[TMAG-RELAY] 嘗試連線');
+    try {
+      const ws = new WebSocket(TMAG_RELAY_WS_ENDPOINT, {
+        headers: {
+          Authorization: `Bearer ${this.callmeshState.apiKey}`
+        }
+      });
+      state.websocket = ws;
+      ws.on('open', () => {
+        state.connecting = false;
+        this.emitTenmanLog('[TMAG-RELAY] WebSocket 已連線');
+        this.flushTmagRelayQueue();
+      });
+      ws.on('close', (code, reason) => {
+        state.connecting = false;
+        this.scheduleTmagRelayReconnect();
+      });
+      ws.on('error', (err) => {
+        state.connecting = false;
+        this.scheduleTmagRelayReconnect();
+      });
+    } catch (err) {
+      state.connecting = false;
+      this.scheduleTmagRelayReconnect();
+    }
+  }
+
+  resetTmagRelayWebsocket() {
+    const state = this.tmagRelayState;
+    if (!state) return;
+    if (state.reconnectTimer) {
+      clearTimeout(state.reconnectTimer);
+      state.reconnectTimer = null;
+    }
+    if (state.websocket) {
+      try {
+        state.websocket.terminate();
+      } catch {
+        // ignore
+      }
+      state.websocket = null;
+    }
+    state.connecting = false;
+  }
+
+  scheduleTmagRelayReconnect() {
+    const state = this.tmagRelayState;
+    if (!state || !this.isTmagRelayEnabled()) {
+      return;
+    }
+    if (state.reconnectTimer) {
+      return;
+    }
+    const jitter = Math.random() * TMAG_RELAY_RECONNECT_BASE_MS;
+    const delay = Math.min(TMAG_RELAY_RECONNECT_MAX_MS, TMAG_RELAY_RECONNECT_BASE_MS + jitter);
+    state.reconnectTimer = setTimeout(() => {
+      state.reconnectTimer = null;
+      this.ensureTmagRelayWebsocket();
+    }, delay);
+    state.reconnectTimer.unref?.();
+  }
+
+  enqueueTmagRelay(payload) {
+    const state = this.tmagRelayState;
+    if (!state || !this.isTmagRelayEnabled()) {
+      return;
+    }
+    if (!payload) return;
+    const data =
+      Buffer.isBuffer(payload) || payload instanceof Uint8Array
+        ? Buffer.from(payload)
+        : typeof payload === 'string'
+            ? Buffer.from(payload)
+            : null;
+    if (!data) return;
+    if (!state.websocket || state.websocket.readyState !== WebSocket.OPEN) {
+      // 無佇列策略：未連線直接丟棄
+      this.ensureTmagRelayWebsocket();
+      return;
+    }
+    try {
+      state.websocket.send(data);
+    } catch (err) {
+    }
+  }
+
+  flushTmagRelayQueue() {
+    const state = this.tmagRelayState;
+    if (!state || !state.websocket || state.websocket.readyState !== WebSocket.OPEN) {
+      this.ensureTmagRelayWebsocket();
+    }
+  }
+
+  forwardTmagRelayFromRadio(event = {}) {
+    if (!this.isTmagRelayEnabled()) {
+      return;
+    }
+    if (!Buffer.isBuffer(event.rawPayload)) {
+      return;
+    }
+    this.enqueueTmagRelay(event.rawPayload);
+  }
+
+  forwardTmagRelayToRadio(rawFrame) {
+    if (!this.isTmagRelayEnabled()) {
+      return;
+    }
+    if (!Buffer.isBuffer(rawFrame)) {
+      return;
+    }
+    this.enqueueTmagRelay(rawFrame);
+  }
+
+  emitTenmanLog(message) {
+    this.emitLog('TENMAN', message);
   }
 
   enqueueTenmanPublish(message, dedupeKey) {
@@ -2499,6 +3308,9 @@ class CallMeshAprsBridge extends EventEmitter {
     if (ws) {
       try {
         ws.removeAllListeners();
+        ws.once('error', () => {
+          // Swallow termination errors to避免在連線尚未建立時拋出未處理例外
+        });
         ws.terminate();
       } catch {
         // ignore
@@ -2930,7 +3742,9 @@ class CallMeshAprsBridge extends EventEmitter {
   destroy() {
     this.stopHeartbeatLoop();
     this.teardownAprsConnection();
+    this.resetTmagRelayWebsocket();
     this.flushNodeDatabasePersistSync();
+    this.flushAprsCachePersistSync();
     this.meshtasticClients.clear();
     if (this.dataStoreInitialized && this.dataStore) {
       try {
@@ -3000,6 +3814,7 @@ class CallMeshAprsBridge extends EventEmitter {
     this.callmeshState.cachedProvision = cloneProvision(provision);
     this.callmeshState.lastProvisionRaw = incomingRaw;
     this.aprsLastPositionDigest.clear();
+    this.scheduleAprsCachePersist();
     const payload = {
       provision: canonical,
       savedAt: new Date().toISOString()
@@ -3283,24 +4098,32 @@ class CallMeshAprsBridge extends EventEmitter {
       });
     }
     this.pruneAprsPacketCache(timestamp);
+    this.scheduleAprsCachePersist();
   }
 
   pruneAprsPacketCache(now = Date.now()) {
+    let modified = false;
     for (const [key, seenAt] of Array.from(this.aprsPacketCache.entries())) {
       if (!Number.isFinite(seenAt) || now - seenAt > APRS_PACKET_CACHE_TTL_MS) {
         this.aprsPacketCache.delete(key);
+        modified = true;
       }
     }
     for (const [callsign, summary] of Array.from(this.aprsCallsignSummary.entries())) {
       const seenAt = summary?.lastSeen ?? 0;
       if (!Number.isFinite(seenAt) || now - seenAt > APRS_PACKET_CACHE_TTL_MS) {
         this.aprsCallsignSummary.delete(callsign);
+        modified = true;
       }
     }
     for (const [key, seenAt] of Array.from(this.aprsLocalTxHistory.entries())) {
       if (!Number.isFinite(seenAt) || now - seenAt > APRS_LOCAL_TX_WINDOW_MS) {
         this.aprsLocalTxHistory.delete(key);
+        modified = true;
       }
+    }
+    if (modified) {
+      this.scheduleAprsCachePersist();
     }
   }
 
@@ -3316,6 +4139,7 @@ class CallMeshAprsBridge extends EventEmitter {
     }
     if (now - seenAt > APRS_PACKET_CACHE_TTL_MS) {
       this.aprsPacketCache.delete(key);
+      this.scheduleAprsCachePersist();
     }
     return false;
   }
@@ -3339,24 +4163,7 @@ class CallMeshAprsBridge extends EventEmitter {
     }
     if (now - seenAt > APRS_LOCAL_TX_WINDOW_MS) {
       this.aprsLocalTxHistory.delete(key);
-    }
-    return false;
-  }
-
-  shouldSuppressDueToRecentCallsignActivity(callsign, now = Date.now()) {
-    if (APRS_CALLSIGN_RECENT_SUPPRESS_MS <= 0) return false;
-    const normalized = normalizeAprsCallsign(callsign);
-    if (!normalized) return false;
-    const summary = this.aprsCallsignSummary.get(normalized);
-    if (!summary || !Number.isFinite(summary.lastSeen)) {
-      return false;
-    }
-    const elapsed = now - summary.lastSeen;
-    if (elapsed < APRS_CALLSIGN_RECENT_SUPPRESS_MS) {
-      return {
-        remainingMs: Math.max(0, APRS_CALLSIGN_RECENT_SUPPRESS_MS - elapsed),
-        elapsedMs: elapsed
-      };
+      this.scheduleAprsCachePersist();
     }
     return false;
   }
@@ -3664,14 +4471,28 @@ class CallMeshAprsBridge extends EventEmitter {
       return;
     }
 
-    const recentSuppression = this.shouldSuppressDueToRecentCallsignActivity(normalizedCallsign, now);
-    if (recentSuppression) {
-      this.markAprsSummaryRejected(summary, 'recent-activity', {
-        callsign: normalizedCallsign,
-        windowMs: APRS_CALLSIGN_RECENT_SUPPRESS_MS,
-        remainingMs: recentSuppression.remainingMs
+    const antiDecision = this.evaluateAprsAntiBacktrackGate(normalizedCallsign, pos, now);
+    if (antiDecision?.decision === 'hold') {
+      const remainingMs =
+        Number.isFinite(antiDecision.pendingAgeMs) && antiDecision.pendingAgeMs >= 0
+          ? Math.max(0, APRS_ANTI_BACKTRACK_CONFIRM_WINDOW_MS - antiDecision.pendingAgeMs)
+          : APRS_ANTI_BACKTRACK_CONFIRM_WINDOW_MS;
+      const message = this.formatAprsAntiBacktrackHoldMessage(antiDecision);
+      this.markAprsSummaryRejected(summary, 'backtrack-pending', {
+        message,
+        windowMs: APRS_ANTI_BACKTRACK_CONFIRM_WINDOW_MS,
+        remainingMs
       });
-      this.emitLog('APRS', `uplink skipped (recent APRS activity) callsign=${normalizedCallsign}`);
+      const parts = [
+        `anti-backtrack hold callsign=${normalizedCallsign}`,
+        `reason=${antiDecision.reason || 'unknown'}`,
+        Number.isFinite(antiDecision.speedKph) ? `speed=${antiDecision.speedKph.toFixed(1)}km/h` : null,
+        Number.isFinite(antiDecision.distKm) ? `dist=${antiDecision.distKm.toFixed(2)}km` : null,
+        Number.isFinite(antiDecision.pendingDistanceKm)
+          ? `pending_dist=${antiDecision.pendingDistanceKm.toFixed(2)}km`
+          : null
+      ].filter(Boolean);
+      this.emitLog('APRS', parts.join(' '));
       return;
     }
 
@@ -3683,6 +4504,17 @@ class CallMeshAprsBridge extends EventEmitter {
     if (sent) {
       this.recordTelemetryAprsForward(summary.timestampMs);
       this.recordLocalAprsTransmission(normalizedCallsign, payload, now);
+      this.applyAprsAntiBacktrackUpload(normalizedCallsign, pos, now, antiDecision);
+      if (antiDecision?.reason === 'pending-confirmed') {
+        if (!Array.isArray(summary.extraLines)) {
+          summary.extraLines = [];
+        }
+        const passLine = 'APRS 防回朔：已通過二次確認';
+        if (!summary.extraLines.includes(passLine)) {
+          summary.extraLines.push(passLine);
+        }
+        this.emitLog('APRS', `anti-backtrack accept (pending-confirmed) callsign=${normalizedCallsign}`);
+      }
       if (meshId) {
         this.rememberAprsPositionDigest(meshId, digest);
       }
@@ -3712,6 +4544,7 @@ class CallMeshAprsBridge extends EventEmitter {
         this.aprsLastPositionDigest.delete(firstKey);
       }
     }
+    this.scheduleAprsCachePersist();
   }
 
   markAprsSummaryRejected(summary, reasonCode, context = {}) {
@@ -3787,6 +4620,64 @@ class CallMeshAprsBridge extends EventEmitter {
     );
     lastPositionDigest.sort((a, b) => (b.timestampMs ?? 0) - (a.timestampMs ?? 0));
 
+    const antiBacktrackState = Array.from(this.aprsAntiBacktrackState.entries()).map(
+      ([callsign, state]) => {
+        const pendingAge = Number.isFinite(state?.pending?.firstSeenMs)
+          ? now - state.pending.firstSeenMs
+          : null;
+        return {
+          callsign,
+          mode: state?.mode || 'car',
+          modeUpdatedMs: state?.modeUpdatedMs ?? null,
+          modeUpdatedIso:
+            Number.isFinite(state?.modeUpdatedMs) && state.modeUpdatedMs
+              ? new Date(state.modeUpdatedMs).toISOString()
+              : null,
+          lastUploaded: state?.lastUploaded
+            ? {
+                lat: state.lastUploaded.lat,
+                lon: state.lastUploaded.lon,
+                timestampMs: state.lastUploaded.timestampMs,
+                timestampIso: state.lastUploaded.timestampMs
+                  ? new Date(state.lastUploaded.timestampMs).toISOString()
+                  : null
+              }
+            : null,
+          prevUploaded: state?.prevUploaded
+            ? {
+                lat: state.prevUploaded.lat,
+                lon: state.prevUploaded.lon,
+                timestampMs: state.prevUploaded.timestampMs,
+                timestampIso: state.prevUploaded.timestampMs
+                  ? new Date(state.prevUploaded.timestampMs).toISOString()
+                  : null
+              }
+            : null,
+          pending: state?.pending
+            ? {
+                lat: state.pending.lat,
+                lon: state.pending.lon,
+                firstSeenMs: state.pending.firstSeenMs ?? null,
+                lastSeenMs: state.pending.lastSeenMs ?? null,
+                reason: state.pending.reason || null,
+                ageMs: pendingAge,
+                firstSeenIso:
+                  Number.isFinite(state.pending.firstSeenMs) && state.pending.firstSeenMs
+                    ? new Date(state.pending.firstSeenMs).toISOString()
+                    : null
+              }
+            : null,
+          historySize: Array.isArray(state?.history) ? state.history.length : 0
+        };
+      }
+    );
+    antiBacktrackState.sort((a, b) => {
+      const aTs = a.lastUploaded?.timestampMs ?? 0;
+      const bTs = b.lastUploaded?.timestampMs ?? 0;
+      return bTs - aTs;
+    });
+    const antiBacktrackPending = antiBacktrackState.filter((entry) => entry.pending).length;
+
     return {
       generatedAt: new Date(now).toISOString(),
       aprsState: {
@@ -3806,11 +4697,14 @@ class CallMeshAprsBridge extends EventEmitter {
       localTxHistory,
       callsignSummary,
       lastPositionDigest,
+      antiBacktrackState: antiBacktrackState.slice(0, 128),
       stats: {
         packetCacheSize: this.aprsPacketCache.size,
         localTxHistorySize: this.aprsLocalTxHistory.size,
         callsignSummarySize: this.aprsCallsignSummary.size,
-        lastPositionDigestSize: this.aprsLastPositionDigest.size
+        lastPositionDigestSize: this.aprsLastPositionDigest.size,
+        antiBacktrackSize: this.aprsAntiBacktrackState.size,
+        antiBacktrackPending
       }
     };
   }
@@ -3892,28 +4786,57 @@ class CallMeshAprsBridge extends EventEmitter {
   }
 
   pruneAprsCachesByWhitelist(_reason = 'update') {
+    let modified = false;
     if (!this.aprsAllowedCallsigns.size) {
-      this.aprsPacketCache.clear();
-      this.aprsCallsignSummary.clear();
-      this.aprsLocalTxHistory.clear();
+      if (this.aprsPacketCache.size) {
+        this.aprsPacketCache.clear();
+        modified = true;
+      }
+      if (this.aprsCallsignSummary.size) {
+        this.aprsCallsignSummary.clear();
+        modified = true;
+      }
+      if (this.aprsLocalTxHistory.size) {
+        this.aprsLocalTxHistory.clear();
+        modified = true;
+      }
+      if (this.aprsAntiBacktrackState.size) {
+        this.aprsAntiBacktrackState.clear();
+        modified = true;
+      }
+      if (modified) {
+        this.scheduleAprsCachePersist();
+      }
       return;
     }
     for (const key of Array.from(this.aprsPacketCache.keys())) {
       const callsign = extractCallsignFromAprsKey(key);
       if (callsign && !this.aprsAllowedCallsigns.has(callsign)) {
         this.aprsPacketCache.delete(key);
+        modified = true;
       }
     }
     for (const key of Array.from(this.aprsLocalTxHistory.keys())) {
       const callsign = extractCallsignFromAprsKey(key);
       if (callsign && !this.aprsAllowedCallsigns.has(callsign)) {
         this.aprsLocalTxHistory.delete(key);
+        modified = true;
       }
     }
     for (const callsign of Array.from(this.aprsCallsignSummary.keys())) {
       if (!this.aprsAllowedCallsigns.has(callsign)) {
         this.aprsCallsignSummary.delete(callsign);
+        modified = true;
       }
+    }
+    for (const callsign of Array.from(this.aprsAntiBacktrackState.keys())) {
+      if (!this.aprsAllowedCallsigns.has(callsign)) {
+        this.aprsAntiBacktrackState.delete(callsign);
+        modified = true;
+      }
+    }
+    if (modified) {
+      this.scheduleAprsCachePersist();
     }
   }
 
@@ -6072,6 +6995,26 @@ function splitAprsPacketKey(key) {
   return { callsign, infoString };
 }
 
+function haversineKm(lat1, lon1, lat2, lon2) {
+  if (
+    !Number.isFinite(lat1) ||
+    !Number.isFinite(lon1) ||
+    !Number.isFinite(lat2) ||
+    !Number.isFinite(lon2)
+  ) {
+    return NaN;
+  }
+  const toRad = (deg) => (deg * Math.PI) / 180;
+  const R = 6371;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
 function isMappingEntryEnabled(mapping) {
   if (!mapping) return false;
   const flagCandidates = [
@@ -6103,11 +7046,6 @@ function formatAprsRejectionLabel(reason, context = {}) {
       return windowLabel ? `本機 ${windowLabel} 內已上傳` : '本機冷卻時間內已上傳';
     case 'seen-on-feed':
       return windowLabel ? `APRS-IS ${windowLabel} 內已有相同封包` : 'APRS-IS 已存在相同封包';
-    case 'recent-activity':
-      if (remainingLabel) {
-        return `呼號冷卻中（剩餘 ${remainingLabel}）`;
-      }
-      return windowLabel ? `呼號冷卻中（需等待 ${windowLabel}）` : '呼號冷卻中';
     default:
       return context.message || '不符合 APRS 上傳條件';
   }

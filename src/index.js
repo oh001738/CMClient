@@ -13,9 +13,11 @@ const { CallMeshAprsBridge, normalizeMeshId } = require('./callmesh/aprsBridge')
 const { WebDashboardServer } = require('./web/server');
 const { CallMeshDataStore } = require('./storage/callmeshDataStore');
 const { sanitizeSummaryForDisplay } = require('./utils/summaryDisplay');
+const { getAppTimezone, formatTimestampLabel } = require('./timezone');
 const pkg = require('../package.json');
 
 const MESSAGE_LOG_FILENAME = 'message-log.jsonl';
+const appTimezone = getAppTimezone();
 let bridgeSummaryListener = null;
 
 function getMessageLogPath() {
@@ -138,7 +140,7 @@ function tryPublishWebMessage(webServer, summary) {
   const timestampLabel =
     typeof summary.timestampLabel === 'string' && summary.timestampLabel.trim()
       ? summary.timestampLabel.trim()
-      : new Date(timestampMs).toISOString();
+      : formatTimestampLabel(timestampMs, { timeZone: appTimezone });
   const flowId =
     typeof summary.flowId === 'string' && summary.flowId.trim()
       ? summary.flowId.trim()
@@ -528,6 +530,7 @@ async function startMonitor(argv) {
     try {
       const webDashboardOptions = {
         appVersion: pkg.version || '0.0.0',
+        timezone: appTimezone,
         relayStatsPath,
         relayStatsStore: sharedDataStore,
         messageLogPath: getMessageLogPath(),
@@ -541,7 +544,7 @@ async function startMonitor(argv) {
       }
       webServer = new WebDashboardServer(webDashboardOptions);
       await webServer.start();
-      webServer.setAppVersion(pkg.version || '0.0.0');
+      webServer.setAppInfo({ version: pkg.version || '0.0.0', timezone: appTimezone });
       webServer.publishStatus({ status: 'disconnected' });
       const snapshot = toWebCallmeshState(bridge.getStateSnapshot());
       if (snapshot) {
@@ -618,7 +621,9 @@ async function startMonitor(argv) {
     };
   };
 
-  const hostInput = typeof argv.host === 'string' ? argv.host.trim() : '';
+  const envHost =
+    typeof process.env.MESHTASTIC_HOST === 'string' ? process.env.MESHTASTIC_HOST.trim() : '';
+  const hostInput = envHost || (argv.host ? String(argv.host).trim() : '');
   const normalizedConnectionArg =
     typeof argv.connection === 'string' ? argv.connection.trim().toLowerCase() : '';
   const serialSpec = parseSerialEndpoint(hostInput);
@@ -663,7 +668,14 @@ async function startMonitor(argv) {
   }
 
   const tcpHost = hostInput || '127.0.0.1';
-  const tcpPort = Number.isFinite(argv.port) ? argv.port : 4403;
+  const envPortRaw = typeof process.env.MESHTASTIC_PORT === 'string' ? process.env.MESHTASTIC_PORT : null;
+  const envPort = envPortRaw && envPortRaw.trim() ? Number(envPortRaw) : null;
+  const tcpPort =
+    Number.isFinite(argv.port) && argv.port > 0
+      ? argv.port
+      : Number.isFinite(envPort) && envPort > 0
+        ? envPort
+        : 4403;
   const connectionSummary =
     transport === 'serial'
       ? `Serial ${serialPath} @ ${serialBaudRate}`
@@ -872,6 +884,18 @@ async function startMonitor(argv) {
   client.on('summary', (summary) => {
     handleSummary(summary);
   });
+
+  client.on('fromRadio', ({ message, rawPayload, summary }) => {
+    if (typeof bridge.forwardTmagRelayFromRadio === 'function') {
+      bridge.forwardTmagRelayFromRadio({ message, rawPayload, summary });
+    }
+  });
+  if (typeof bridge.forwardTmagRelayToRadio === 'function') {
+    const emitOutbound = (payloadBuffer) => {
+      bridge.forwardTmagRelayToRadio(payloadBuffer);
+    };
+    client.on('toRadioRaw', emitOutbound);
+  }
 
   if (argv.format !== 'summary') {
     client.on('fromRadio', ({ message }) => {

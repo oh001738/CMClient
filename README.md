@@ -22,7 +22,7 @@ TMAG 是一套使用 Node.js 打造的 **Meshtastic → APRS Gateway**，整合�
 - **穩定時間戳**：Telemetry 紀錄寫入時會使用收包當下的時間戳，避免裝置 RTC 漂移造成前端區間掛零。
 - **節點資料庫共用**：內建 `nodeDatabase` 集中維護節點長短名、模型、座標等資訊，CLI / Electron / Web 透過 `node`、`node-snapshot` 事件共享同一份資料，節點清單支援座標搜尋與距離顯示。
 - **訊息與 Relay 體驗**：GUI/Web 會持久化 CH0~CH3 文字訊息（含節點暱稱、最後轉發資訊），同時提供 Relay 推測提示 UI，能追蹤候選節點與推測理由。
-- **APRS 去重**：橋接層內建三層快取（feed 30 分鐘、本地與座標 30 秒），即使 Meshtastic 網路延遲 30 秒～10 分鐘，也能避免不同站重複 uplink 造成位置回朔或浪費 APRS-IS 配額。
+- **APRS 去重**：橋接層內建三層快取（feed 3 小時、本地與座標 30 秒），即使 Meshtastic 網路延遲 30 秒～10 分鐘，也能避免不同站重複 uplink 造成位置回朔或浪費 APRS-IS 配額。
 
 ---
 
@@ -261,11 +261,11 @@ node src/index.js callmesh sync \
 ### APRS 去重與偵錯
 
 - **改善動機**：Meshtastic 網路偶爾塞住，封包可能延遲 30 秒到 10 分鐘才送到另一個站台。若每站都再次 uplink，同一筆位置會在 APRS-IS 上「倒退」，也浪費配額。
-- **三層快取**（皆為記憶體資料，重啟即清空）  
-  1. `aprsPacketCache` / `aprsCallsignSummary`：記錄 30 分鐘內 APRS-IS feed 已出現的 payload／呼號，只要再看到相同呼號＋payload，就標記 `seen-on-feed` 並跳過上傳。  
+- **三層快取**（同步寫入 `callmesh-data.sqlite`，重啟會重新載入並套用 TTL）  
+  1. `aprsPacketCache` / `aprsCallsignSummary`：記錄 3 小時內 APRS-IS feed 已出現的 payload／呼號，只要再看到相同呼號＋payload，就標記 `seen-on-feed` 並跳過上傳。  
   2. `aprsLocalTxHistory`：保留本地 uplink 的 payload 30 秒，用來擋掉 UI/排程誤觸造成的重送。  
   3. `aprsLastPositionDigest`：同一 Mesh ID 30 秒內座標＋符號＋註解完全相同就不再上傳，避免 GPS 靜止時不停重複。  
-- **使用方式**：任何實例都可開 `http://<host>:7080/debug` 檢視 `aprsDedup`，快速判斷某筆為何被擋。例如 `packetCache` 命中代表 feed 已有、`localTxHistory` 命中代表 30 秒內剛由本機上傳。  
+- **使用方式**：任何實例都可開 `http://<host>:7080/debug` 檢視 `aprsDedup`，快速判斷某筆為何被擋。例如 `packetCache` 命中代表 feed 已有、`localTxHistory` 命中代表 30 秒內剛由本機上傳；這些欄位同時鏡射 `callmesh-data.sqlite` 內的 `aprs_*` 表，可跨重啟追蹤。  
 - **自訂與除錯**：  
   - `TMAG_APRS_FEED_FILTER` / `TMAG_APRS_FEED_RADIUS_KM` 用來覆寫監聽範圍，未設定時會依 Provision 座標自動套用 `#filter r/<lat>/<lon>/300`。  
   - `TMAG_APRS_LOG_VERBOSE=1` 可恢復完整的 APRS tx/rx/keepalive log，預設靜音避免噴 log。  
@@ -298,7 +298,7 @@ GUI 提供：
   腳本會將每筆紀錄的 `timestampMs`／`sampleTimeMs`／`telemetry.timeMs` 對齊收包時刻，並保留 `.bak` 備份。
 - **遙測資料儲存**：自 v0.2.23 起改採 `~/.config/callmesh/telemetry-records.sqlite`（SQLite）；首次啟動會自動匯入舊版 JSONL 並將原檔更名為 `.migrated`。
 - **遙測歷史復原**：若 SQLite 已寫入新資料、但仍要再次匯入 `telemetry-records.jsonl.migrated`，只要在程式關閉後把它改回 `telemetry-records.jsonl`（CLI 路徑 `~/.config/callmesh/`，GUI 路徑 `~/Library/Application Support/TMAG Monitor/callmesh/`），下次啟動會再次把整份 JSON 匯入資料庫，完成後檔案會自動改回 `.migrated` 備份。
-- **共用資料庫**：節點快照、Mapping/Provision 快取、訊息紀錄與 Relay 統計統一儲存在 `~/.config/callmesh/callmesh-data.sqlite`，升級時會自動匯入舊版 `node-database.json`、`message-log.jsonl`、`relay-link-stats.json`。
+- **共用資料庫**：節點快照、Mapping/Provision 快取、訊息紀錄、Relay 統計與 APRS 去重快取統一儲存在 `~/.config/callmesh/callmesh-data.sqlite`（新增 `aprs_packet_cache` / `aprs_local_tx` / `aprs_callsign_summary` / `aprs_position_digest`），升級時會自動匯入舊版 `node-database.json`、`message-log.jsonl`、`relay-link-stats.json`。
 - **打包工具**：`scripts/pack-cli.sh`、`scripts/pack-desktop.sh` 可快速產出 CLI / GUI 可攜版（需安裝 `pkg`、`electron-packager`）。
 
 ### 清除節點資料庫

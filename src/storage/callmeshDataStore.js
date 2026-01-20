@@ -210,6 +210,156 @@ function sanitizeMessageEntry(entry, { fallbackFlowId, fallbackChannel, fallback
   };
 }
 
+function sanitizeAprsPacketSnapshotEntry(entry) {
+  if (!entry || typeof entry !== 'object') {
+    return null;
+  }
+  const packetKey = sanitizeText(entry.packetKey ?? entry.key);
+  const lastSeenMs = toFiniteInteger(entry.lastSeenMs ?? entry.lastSeen);
+  if (!packetKey || lastSeenMs == null) {
+    return null;
+  }
+  const callsign = sanitizeText(entry.callsign ?? entry.callSign);
+  let infoValue = entry.infoString;
+  if (infoValue === undefined || infoValue === null) {
+    infoValue = entry.info;
+  }
+  const info =
+    infoValue === undefined || infoValue === null ? null : String(infoValue);
+  return {
+    packetKey,
+    callsign,
+    info,
+    lastSeenMs
+  };
+}
+
+function sanitizeAprsCallsignSummaryEntry(entry) {
+  if (!entry || typeof entry !== 'object') {
+    return null;
+  }
+  const callsign = sanitizeText(entry.callsign ?? entry.callSign);
+  if (!callsign) {
+    return null;
+  }
+  const lastSeenMs = toFiniteInteger(entry.lastSeenMs ?? entry.lastSeen);
+  let infoValue = entry.lastInfo;
+  if (infoValue === undefined || infoValue === null) {
+    infoValue = entry.lastInfoText ?? entry.info ?? null;
+  }
+  const lastInfo =
+    infoValue === undefined || infoValue === null ? null : String(infoValue);
+  return {
+    callsign,
+    lastSeenMs,
+    lastInfo
+  };
+}
+
+function sanitizeAprsPositionDigestEntry(entry) {
+  if (!entry || typeof entry !== 'object') {
+    return null;
+  }
+  const meshId = sanitizeText(entry.meshId ?? entry.mesh_id);
+  if (!meshId) {
+    return null;
+  }
+  const digest = sanitizeText(entry.digest);
+  const timestampMs = toFiniteInteger(entry.timestampMs ?? entry.timestamp);
+  return {
+    meshId,
+    digest,
+    timestampMs
+  };
+}
+
+function sanitizeAprsBacktrackPosition(entry) {
+  if (!entry || typeof entry !== 'object') {
+    return null;
+  }
+  const lat = toFiniteNumber(entry.lat ?? entry.latitude);
+  const lon = toFiniteNumber(entry.lon ?? entry.longitude);
+  const timestampMs = toFiniteInteger(
+    entry.timestampMs ?? entry.timestamp_ms ?? entry.timestamp ?? entry.at ?? entry.time
+  );
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+    return null;
+  }
+  return {
+    lat,
+    lon,
+    timestampMs
+  };
+}
+
+function sanitizeAprsBacktrackHistory(history) {
+  if (!Array.isArray(history)) {
+    return [];
+  }
+  const result = [];
+  for (const item of history) {
+    const pos = sanitizeAprsBacktrackPosition(item);
+    if (pos) {
+      result.push(pos);
+    }
+  }
+  return result;
+}
+
+function sanitizeAprsBacktrackStateEntry(entry) {
+  if (!entry || typeof entry !== 'object') {
+    return null;
+  }
+  const callsign = sanitizeText(entry.callsign ?? entry.callSign);
+  if (!callsign) {
+    return null;
+  }
+  const lastUploaded = sanitizeAprsBacktrackPosition(entry.lastUploaded ?? entry.last);
+  const prevUploaded = sanitizeAprsBacktrackPosition(entry.prevUploaded ?? entry.prev);
+  const pending = sanitizeAprsBacktrackPosition(entry.pending ?? entry.pendingPos);
+  const pendingFirstSeenMs = toFiniteInteger(
+    entry.pendingFirstSeenMs ??
+      entry.pending_first_seen_ms ??
+      entry.pendingFirstSeen ??
+      entry.pending_first_seen ??
+      entry.pending?.firstSeenMs ??
+      entry.pending?.firstSeen
+  );
+  const pendingReason = sanitizeText(
+    entry.pendingReason ?? entry.pending_reason ?? entry.pending?.reason
+  );
+  const pendingLastSeenMs = toFiniteInteger(
+    entry.pendingLastSeenMs ??
+      entry.pending_last_seen_ms ??
+      entry.pendingLastSeen ??
+      entry.pending?.lastSeenMs ??
+      entry.pending?.lastSeen
+  );
+  const modeRaw = sanitizeText(entry.mode);
+  const mode =
+    modeRaw && ['car', 'hsr'].includes(modeRaw.toLowerCase())
+      ? modeRaw.toLowerCase()
+      : null;
+  const modeUpdatedMs = toFiniteInteger(entry.modeUpdatedMs ?? entry.mode_updated_ms);
+  let historySource = entry.history ?? entry.historyEntries;
+  if (!historySource && typeof entry.history_json === 'string') {
+    historySource = fromJson(entry.history_json);
+  }
+  const history = sanitizeAprsBacktrackHistory(historySource);
+  return {
+    callsign,
+    lastUploaded,
+    prevUploaded,
+    pending,
+    pendingFirstSeenMs,
+    pendingReason,
+    pendingLastSeenMs,
+    mode,
+    modeUpdatedMs,
+    history
+  };
+}
+
 function buildMessageNodeFromRow(row) {
   if (!row) {
     return null;
@@ -337,6 +487,56 @@ class CallMeshDataStore {
         rssi REAL,
         count INTEGER,
         updated_at INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS aprs_packet_cache (
+        packet_key TEXT PRIMARY KEY,
+        callsign TEXT,
+        info TEXT,
+        last_seen_ms INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_aprs_packet_cache_callsign
+        ON aprs_packet_cache(callsign);
+
+      CREATE TABLE IF NOT EXISTS aprs_local_tx (
+        packet_key TEXT PRIMARY KEY,
+        callsign TEXT,
+        info TEXT,
+        last_seen_ms INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_aprs_local_tx_callsign
+        ON aprs_local_tx(callsign);
+
+      CREATE TABLE IF NOT EXISTS aprs_callsign_summary (
+        callsign TEXT PRIMARY KEY,
+        last_seen_ms INTEGER,
+        last_info TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS aprs_position_digest (
+        mesh_id TEXT PRIMARY KEY,
+        digest TEXT,
+        timestamp_ms INTEGER
+      );
+
+      CREATE TABLE IF NOT EXISTS aprs_backtrack_state (
+        callsign TEXT PRIMARY KEY,
+        last_lat REAL,
+        last_lon REAL,
+        last_at INTEGER,
+        prev_lat REAL,
+        prev_lon REAL,
+        prev_at INTEGER,
+        pending_lat REAL,
+        pending_lon REAL,
+        pending_first_seen_ms INTEGER,
+        pending_reason TEXT,
+        pending_last_seen_ms INTEGER,
+        mode TEXT,
+        mode_updated_ms INTEGER,
+        history_json TEXT
       );
     `);
 
@@ -477,6 +677,124 @@ class CallMeshDataStore {
     this.statements.selectRelayStats = this.db.prepare(`
       SELECT mesh_key AS meshKey, snr, rssi, count, updated_at AS updatedAt
       FROM relay_stats
+    `);
+
+    this.statements.clearAprsPacketCache = this.db.prepare('DELETE FROM aprs_packet_cache');
+    this.statements.insertAprsPacketCache = this.db.prepare(`
+      INSERT INTO aprs_packet_cache (packet_key, callsign, info, last_seen_ms)
+      VALUES (@packetKey, @callsign, @info, @lastSeenMs)
+    `);
+    this.statements.selectAprsPacketCache = this.db.prepare(`
+      SELECT packet_key AS packetKey, callsign, info, last_seen_ms AS lastSeenMs
+      FROM aprs_packet_cache
+    `);
+
+    this.statements.clearAprsLocalTx = this.db.prepare('DELETE FROM aprs_local_tx');
+    this.statements.insertAprsLocalTx = this.db.prepare(`
+      INSERT INTO aprs_local_tx (packet_key, callsign, info, last_seen_ms)
+      VALUES (@packetKey, @callsign, @info, @lastSeenMs)
+    `);
+    this.statements.selectAprsLocalTx = this.db.prepare(`
+      SELECT packet_key AS packetKey, callsign, info, last_seen_ms AS lastSeenMs
+      FROM aprs_local_tx
+    `);
+
+    this.statements.clearAprsCallsignSummary = this.db.prepare('DELETE FROM aprs_callsign_summary');
+    this.statements.insertAprsCallsignSummary = this.db.prepare(`
+      INSERT INTO aprs_callsign_summary (callsign, last_seen_ms, last_info)
+      VALUES (@callsign, @lastSeenMs, @lastInfo)
+      ON CONFLICT(callsign) DO UPDATE SET
+        last_seen_ms = excluded.last_seen_ms,
+        last_info = excluded.last_info
+    `);
+    this.statements.selectAprsCallsignSummary = this.db.prepare(`
+      SELECT callsign, last_seen_ms AS lastSeenMs, last_info AS lastInfo
+      FROM aprs_callsign_summary
+    `);
+
+    this.statements.clearAprsPositionDigest = this.db.prepare('DELETE FROM aprs_position_digest');
+    this.statements.insertAprsPositionDigest = this.db.prepare(`
+      INSERT INTO aprs_position_digest (mesh_id, digest, timestamp_ms)
+      VALUES (@meshId, @digest, @timestampMs)
+      ON CONFLICT(mesh_id) DO UPDATE SET
+        digest = excluded.digest,
+        timestamp_ms = excluded.timestamp_ms
+    `);
+    this.statements.selectAprsPositionDigest = this.db.prepare(`
+      SELECT mesh_id AS meshId, digest, timestamp_ms AS timestampMs
+      FROM aprs_position_digest
+    `);
+
+    this.statements.clearAprsBacktrackState = this.db.prepare('DELETE FROM aprs_backtrack_state');
+    this.statements.insertAprsBacktrackState = this.db.prepare(`
+      INSERT INTO aprs_backtrack_state (
+        callsign,
+        last_lat,
+        last_lon,
+        last_at,
+        prev_lat,
+        prev_lon,
+        prev_at,
+        pending_lat,
+        pending_lon,
+        pending_first_seen_ms,
+        pending_reason,
+        pending_last_seen_ms,
+        mode,
+        mode_updated_ms,
+        history_json
+      )
+      VALUES (
+        @callsign,
+        @lastLat,
+        @lastLon,
+        @lastAt,
+        @prevLat,
+        @prevLon,
+        @prevAt,
+        @pendingLat,
+        @pendingLon,
+        @pendingFirstSeenMs,
+        @pendingReason,
+        @pendingLastSeenMs,
+        @mode,
+        @modeUpdatedMs,
+        @historyJson
+      )
+      ON CONFLICT(callsign) DO UPDATE SET
+        last_lat = excluded.last_lat,
+        last_lon = excluded.last_lon,
+        last_at = excluded.last_at,
+        prev_lat = excluded.prev_lat,
+        prev_lon = excluded.prev_lon,
+        prev_at = excluded.prev_at,
+        pending_lat = excluded.pending_lat,
+        pending_lon = excluded.pending_lon,
+        pending_first_seen_ms = excluded.pending_first_seen_ms,
+        pending_reason = excluded.pending_reason,
+        pending_last_seen_ms = excluded.pending_last_seen_ms,
+        mode = excluded.mode,
+        mode_updated_ms = excluded.mode_updated_ms,
+        history_json = excluded.history_json
+    `);
+    this.statements.selectAprsBacktrackState = this.db.prepare(`
+      SELECT
+        callsign,
+        last_lat AS lastLat,
+        last_lon AS lastLon,
+        last_at AS lastAt,
+        prev_lat AS prevLat,
+        prev_lon AS prevLon,
+        prev_at AS prevAt,
+        pending_lat AS pendingLat,
+        pending_lon AS pendingLon,
+        pending_first_seen_ms AS pendingFirstSeenMs,
+        pending_reason AS pendingReason,
+        pending_last_seen_ms AS pendingLastSeenMs,
+        mode,
+        mode_updated_ms AS modeUpdatedMs,
+        history_json AS historyJson
+      FROM aprs_backtrack_state
     `);
   }
 
@@ -1008,6 +1326,167 @@ class CallMeshDataStore {
       throw new Error('CallMeshDataStore 尚未初始化');
     }
     return this.statements.selectRelayStats.all();
+  }
+
+  saveAprsDedupSnapshot(snapshot = {}) {
+    if (!this.db) {
+      throw new Error('CallMeshDataStore 尚未初始化');
+    }
+    const packetEntries = Array.isArray(snapshot.packetCache) ? snapshot.packetCache : [];
+    const localEntries = Array.isArray(snapshot.localTxHistory) ? snapshot.localTxHistory : [];
+    const callsignEntries = Array.isArray(snapshot.callsignSummary) ? snapshot.callsignSummary : [];
+    const digestEntries = Array.isArray(snapshot.positionDigest) ? snapshot.positionDigest : [];
+    const exec = this._createTransaction((payload) => {
+      this.statements.clearAprsPacketCache.run();
+      for (const entry of payload.packetEntries) {
+        const sanitized = sanitizeAprsPacketSnapshotEntry(entry);
+        if (!sanitized) continue;
+        this.statements.insertAprsPacketCache.run(sanitized);
+      }
+
+      this.statements.clearAprsLocalTx.run();
+      for (const entry of payload.localEntries) {
+        const sanitized = sanitizeAprsPacketSnapshotEntry(entry);
+        if (!sanitized) continue;
+        this.statements.insertAprsLocalTx.run(sanitized);
+      }
+
+      this.statements.clearAprsCallsignSummary.run();
+      for (const entry of payload.callsignEntries) {
+        const sanitized = sanitizeAprsCallsignSummaryEntry(entry);
+        if (!sanitized) continue;
+        this.statements.insertAprsCallsignSummary.run({
+          callsign: sanitized.callsign,
+          lastSeenMs: sanitized.lastSeenMs,
+          lastInfo: sanitized.lastInfo
+        });
+      }
+
+      this.statements.clearAprsPositionDigest.run();
+      for (const entry of payload.digestEntries) {
+        const sanitized = sanitizeAprsPositionDigestEntry(entry);
+        if (!sanitized) continue;
+        this.statements.insertAprsPositionDigest.run({
+          meshId: sanitized.meshId,
+          digest: sanitized.digest,
+          timestampMs: sanitized.timestampMs
+        });
+      }
+    });
+    exec({
+      packetEntries,
+      localEntries,
+      callsignEntries,
+      digestEntries
+    });
+  }
+
+  loadAprsDedupSnapshot() {
+    if (!this.db) {
+      throw new Error('CallMeshDataStore 尚未初始化');
+    }
+    const packetCache = this.statements.selectAprsPacketCache.all().map((row) => ({
+      packetKey: sanitizeText(row.packetKey),
+      callsign: sanitizeText(row.callsign),
+      infoString:
+        row.info === undefined || row.info === null ? null : String(row.info),
+      lastSeenMs: toFiniteInteger(row.lastSeenMs)
+    }));
+    const localTxHistory = this.statements.selectAprsLocalTx.all().map((row) => ({
+      packetKey: sanitizeText(row.packetKey),
+      callsign: sanitizeText(row.callsign),
+      infoString:
+        row.info === undefined || row.info === null ? null : String(row.info),
+      lastSeenMs: toFiniteInteger(row.lastSeenMs)
+    }));
+    const callsignSummary = this.statements.selectAprsCallsignSummary.all().map((row) => ({
+      callsign: sanitizeText(row.callsign),
+      lastSeenMs: toFiniteInteger(row.lastSeenMs),
+      lastInfo:
+        row.lastInfo === undefined || row.lastInfo === null ? null : String(row.lastInfo)
+    }));
+    const positionDigest = this.statements.selectAprsPositionDigest.all().map((row) => ({
+      meshId: sanitizeText(row.meshId),
+      digest: sanitizeText(row.digest),
+      timestampMs: toFiniteInteger(row.timestampMs)
+    }));
+    return {
+      packetCache: packetCache.filter((entry) => entry.packetKey && entry.lastSeenMs != null),
+      localTxHistory: localTxHistory.filter(
+        (entry) => entry.packetKey && entry.lastSeenMs != null
+      ),
+      callsignSummary: callsignSummary.filter((entry) => entry.callsign),
+      positionDigest: positionDigest.filter((entry) => entry.meshId)
+    };
+  }
+
+  saveAprsBacktrackState(entries = []) {
+    if (!this.db) {
+      throw new Error('CallMeshDataStore 尚未初始化');
+    }
+    const exec = this._createTransaction((items) => {
+      this.statements.clearAprsBacktrackState.run();
+      for (const entry of items) {
+        const sanitized = sanitizeAprsBacktrackStateEntry(entry);
+        if (!sanitized) continue;
+        const historyJson =
+          Array.isArray(sanitized.history) && sanitized.history.length
+            ? toJson(sanitized.history)
+            : null;
+        this.statements.insertAprsBacktrackState.run({
+          callsign: sanitized.callsign,
+          lastLat: sanitized.lastUploaded?.lat ?? null,
+          lastLon: sanitized.lastUploaded?.lon ?? null,
+          lastAt: sanitized.lastUploaded?.timestampMs ?? null,
+          prevLat: sanitized.prevUploaded?.lat ?? null,
+          prevLon: sanitized.prevUploaded?.lon ?? null,
+          prevAt: sanitized.prevUploaded?.timestampMs ?? null,
+          pendingLat: sanitized.pending?.lat ?? null,
+          pendingLon: sanitized.pending?.lon ?? null,
+          pendingFirstSeenMs: sanitized.pendingFirstSeenMs ?? null,
+          pendingReason: sanitized.pendingReason ?? null,
+          pendingLastSeenMs: sanitized.pendingLastSeenMs ?? null,
+          mode: sanitized.mode ?? null,
+          modeUpdatedMs: sanitized.modeUpdatedMs ?? null,
+          historyJson
+        });
+      }
+    });
+    exec(entries);
+  }
+
+  loadAprsBacktrackState() {
+    if (!this.db) {
+      throw new Error('CallMeshDataStore 尚未初始化');
+    }
+    const rows = this.statements.selectAprsBacktrackState.all();
+    return rows.map((row) => {
+      const history = sanitizeAprsBacktrackHistory(fromJson(row.historyJson));
+      return {
+        callsign: sanitizeText(row.callsign),
+        lastUploaded: sanitizeAprsBacktrackPosition({
+          lat: row.lastLat,
+          lon: row.lastLon,
+          timestampMs: row.lastAt
+        }),
+        prevUploaded: sanitizeAprsBacktrackPosition({
+          lat: row.prevLat,
+          lon: row.prevLon,
+          timestampMs: row.prevAt
+        }),
+        pending: sanitizeAprsBacktrackPosition({
+          lat: row.pendingLat,
+          lon: row.pendingLon,
+          timestampMs: row.pendingLastSeenMs ?? row.pendingFirstSeenMs
+        }),
+        pendingFirstSeenMs: toFiniteInteger(row.pendingFirstSeenMs),
+        pendingReason: sanitizeText(row.pendingReason),
+        pendingLastSeenMs: toFiniteInteger(row.pendingLastSeenMs),
+        mode: sanitizeText(row.mode),
+        modeUpdatedMs: toFiniteInteger(row.modeUpdatedMs),
+        history
+      };
+    });
   }
 }
 
