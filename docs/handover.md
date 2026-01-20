@@ -726,6 +726,7 @@ npx pkg src/index.js --targets node18-linux-x64
 ---
 ## 版本註記
 
+- **v0.2.28**：合併 dev 更新至 main，版本提升至 0.2.28；精簡 TMAG Relay WebSocket log、Docker Compose 新增 `TMAG_TIMEZONE` / 保留 AUTO_UPDATE 參數，並加入 Meshwaya 防回朔指引文件。
 - **v0.2.27**：精簡 TMAG Relay WebSocket 相關 log（僅保留停用、缺 API Key、嘗試連線、已連線），同步更新版本號。
 - **v0.2.23**：遙測持久層改用 SQLite（`telemetry-records.sqlite`），啟動時自動匯入舊版 JSONL 並備份。
 - **v0.2.21**：恢復 TenManMap 位置 `extra` payload 與節點詳細欄位，避免既有整合收不到資料。
