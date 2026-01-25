@@ -17,7 +17,21 @@ UPDATE_SERVICE_PATH="/etc/systemd/system/${UPDATE_SERVICE_NAME}.service"
 UPDATE_TIMER_PATH="/etc/systemd/system/${UPDATE_SERVICE_NAME}.timer"
 ENV_DIR="/etc/callmesh"
 ENV_FILE="${ENV_DIR}/callmesh.env"
-PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROFILE_FILE="/etc/profile.d/callmesh.sh"
+SERVICE_LINK="/usr/local/bin/callmesh-service"
+INSTALL_LINK="/usr/local/bin/callmesh-install"
+resolve_project_root() {
+  if [ -n "${TMAG_HOME:-}" ] && [ -d "$TMAG_HOME" ]; then
+    printf '%s\n' "$TMAG_HOME"
+    return
+  fi
+  local src="${BASH_SOURCE[0]}"
+  if command -v readlink >/dev/null 2>&1; then
+    src="$(readlink -f "$src" 2>/dev/null || echo "$src")"
+  fi
+  printf '%s\n' "$(cd "$(dirname "$src")/.." && pwd)"
+}
+PROJECT_ROOT="$(resolve_project_root)"
 NODE_BIN="$(command -v node || true)"
 REQUIRED_NODE_MAJOR=22
 RUN_AS_USER="${RUN_AS_USER:-${SUDO_USER:-$(id -un)}}"
@@ -527,6 +541,16 @@ install_service() {
   $sudo_cmd systemctl daemon-reload
   $sudo_cmd systemctl enable --now "$SERVICE_NAME"
   log "服務已啟用並開機自動啟動。"
+
+  # 建立環境變數檔與快捷指令
+  $sudo_cmd tee "$PROFILE_FILE" >/dev/null <<EOF
+export TMAG_HOME="${PROJECT_ROOT}"
+export PATH="\$PATH:/usr/local/bin"
+EOF
+  $sudo_cmd chmod 644 "$PROFILE_FILE"
+  $sudo_cmd ln -sf "${PROJECT_ROOT}/scripts/manage-service-linux.sh" "$SERVICE_LINK"
+  $sudo_cmd ln -sf "${PROJECT_ROOT}/scripts/install-linux.sh" "$INSTALL_LINK"
+  log "已建立快捷指令：$SERVICE_LINK（任意目錄可執行 callmesh-service）"
 }
 
 set_key() {
