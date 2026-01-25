@@ -196,7 +196,7 @@ npx pkg src/index.js \
   `bash -c "curl -fsSL https://raw.githubusercontent.com/toodi0418/CMClient/main/scripts/bootstrap-linux.sh | bash"`  
   - 自訂目錄：`TMAG_DIR=/opt/CMClient`；自訂分支：`TMAG_BRANCH=main`
   - 若無法互動輸入，可提前設定 `CALLMESH_API_KEY=<你的 Key>`
-- 安裝完成後會寫入 `/etc/profile.d/callmesh.sh`（`TMAG_HOME=<安裝路徑>`），並建立快捷指令 `/usr/local/bin/callmesh-service`，在任何目錄直接執行 `callmesh-service` 即可呼叫管理選單
+- 安裝完成後會寫入 `/etc/profile.d/callmesh.sh`（`TMAG_HOME=<安裝路徑>`），並建立快捷指令 `/usr/local/bin/callmesh-service` 與短指令 `/usr/local/bin/tmag`，在任何目錄直接執行 `callmesh-service` 或 `tmag` 即可呼叫管理選單
 
 ---
 

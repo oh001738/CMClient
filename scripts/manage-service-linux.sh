@@ -20,6 +20,7 @@ ENV_FILE="${ENV_DIR}/callmesh.env"
 PROFILE_FILE="/etc/profile.d/callmesh.sh"
 SERVICE_LINK="/usr/local/bin/callmesh-service"
 INSTALL_LINK="/usr/local/bin/callmesh-install"
+SHORT_LINK="/usr/local/bin/tmag"
 resolve_project_root() {
   if [ -n "${TMAG_HOME:-}" ] && [ -d "$TMAG_HOME" ]; then
     printf '%s\n' "$TMAG_HOME"
@@ -550,7 +551,8 @@ EOF
   $sudo_cmd chmod 644 "$PROFILE_FILE"
   $sudo_cmd ln -sf "${PROJECT_ROOT}/scripts/manage-service-linux.sh" "$SERVICE_LINK"
   $sudo_cmd ln -sf "${PROJECT_ROOT}/scripts/install-linux.sh" "$INSTALL_LINK"
-  log "已建立快捷指令：$SERVICE_LINK（任意目錄可執行 callmesh-service）"
+  $sudo_cmd ln -sf "$SERVICE_LINK" "$SHORT_LINK"
+  log "已建立快捷指令：$SERVICE_LINK / $SHORT_LINK（任意目錄可執行管理選單）"
 }
 
 set_key() {
