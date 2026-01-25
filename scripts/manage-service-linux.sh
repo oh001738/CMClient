@@ -74,23 +74,97 @@ sudo_prefix() {
   fi
 }
 
+detect_package_manager() {
+  if command -v apt-get >/dev/null 2>&1; then
+    echo "apt"
+  elif command -v dnf >/dev/null 2>&1; then
+    echo "dnf"
+  elif command -v yum >/dev/null 2>&1; then
+    echo "yum"
+  elif command -v pacman >/dev/null 2>&1; then
+    echo "pacman"
+  elif command -v zypper >/dev/null 2>&1; then
+    echo "zypper"
+  else
+    echo ""
+  fi
+}
+
+install_packages() {
+  local pm="$1"; shift
+  local sudo_cmd
+  sudo_cmd="$(sudo_prefix)"
+  case "$pm" in
+    apt)
+      $sudo_cmd apt-get update
+      $sudo_cmd apt-get install -y "$@"
+      ;;
+    dnf)
+      $sudo_cmd dnf install -y "$@"
+      ;;
+    yum)
+      $sudo_cmd yum install -y "$@"
+      ;;
+    pacman)
+      $sudo_cmd pacman -Sy --noconfirm --needed "$@"
+      ;;
+    zypper)
+      $sudo_cmd zypper --non-interactive refresh
+      $sudo_cmd zypper --non-interactive install "$@"
+      ;;
+    *)
+      err "無法偵測可用的套件管理器，請手動安裝：$*"
+      exit 1
+      ;;
+  esac
+}
+
 check_node() {
   if [ -z "$NODE_BIN" ]; then
-    err "找不到 node，請先安裝 Node.js ${REQUIRED_NODE_MAJOR} 或以上版本。"
-    exit 1
+    log "找不到 node，嘗試執行 scripts/install-linux.sh 安裝 Node.js ${REQUIRED_NODE_MAJOR}+ ..."
+    if [ -x "${PROJECT_ROOT}/scripts/install-linux.sh" ]; then
+      bash "${PROJECT_ROOT}/scripts/install-linux.sh"
+      NODE_BIN="$(command -v node || true)"
+    fi
   fi
 
   local major
-  major="$("$NODE_BIN" -v | sed 's/^v//' | cut -d. -f1)"
+  if [ -n "$NODE_BIN" ]; then
+    major="$("$NODE_BIN" -v | sed 's/^v//' | cut -d. -f1)"
+    if [ "$major" -lt "$REQUIRED_NODE_MAJOR" ]; then
+      log "偵測到 Node.js v${major}，低於需求 (${REQUIRED_NODE_MAJOR}+)，嘗試升級..."
+      if [ -x "${PROJECT_ROOT}/scripts/install-linux.sh" ]; then
+        bash "${PROJECT_ROOT}/scripts/install-linux.sh"
+        NODE_BIN="$(command -v node || true)"
+        major="$("$NODE_BIN" -v | sed 's/^v//' | cut -d. -f1)"
+      fi
+    fi
+  fi
+
+  if [ -z "$NODE_BIN" ]; then
+    err "仍找不到 Node.js，請手動安裝 ${REQUIRED_NODE_MAJOR}+。"
+    exit 1
+  fi
   if [ "$major" -lt "$REQUIRED_NODE_MAJOR" ]; then
-    err "偵測到 Node.js v${major}，請升級到 ${REQUIRED_NODE_MAJOR} 或以上版本。"
+    err "Node.js 版本仍低於 ${REQUIRED_NODE_MAJOR}，請手動升級。"
     exit 1
   fi
 }
 
 require_git() {
+  if command -v git >/dev/null 2>&1; then
+    return
+  fi
+
+  log "找不到 git，嘗試自動安裝..."
+  local pm
+  pm="$(detect_package_manager)"
+  if [ -n "$pm" ]; then
+    install_packages "$pm" git
+  fi
+
   if ! command -v git >/dev/null 2>&1; then
-    err "找不到 git，請先安裝後再試。"
+    err "仍找不到 git，請手動安裝後再試。"
     exit 1
   fi
 }

@@ -191,6 +191,7 @@ npx pkg src/index.js \
 - 檢查/更新版本：`bash scripts/manage-service-linux.sh check-update`、`bash scripts/manage-service-linux.sh update`（成功後自動重啟服務）
 - 自動更新：`bash scripts/manage-service-linux.sh auto-update-enable`（預設每日 04:00，隨機延遲 ≤30 分鐘，可改環境變數 `UPDATE_SCHEDULE`）；停用/查詢：`auto-update-disable` / `auto-update-status`
 - 安裝時可選擇 TCP/IP 或 Serial；選 Serial 時會列出 /dev/ttyUSB* / /dev/ttyACM* / /dev/ttyS* / /dev/ttyAMA* 供選擇，並可輸入自訂路徑與鮑率
+- 缺少 git / Node.js 22 會自動嘗試安裝（透過套件管理器或 `scripts/install-linux.sh`）
 - 全自動一行安裝（安裝依賴 + 建立服務，會互動詢問 API Key）：  
   `bash -c "git clone https://github.com/toodi0418/CMClient.git && cd CMClient && bash scripts/install-linux.sh && bash scripts/manage-service-linux.sh install"`
 
