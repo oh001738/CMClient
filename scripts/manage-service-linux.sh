@@ -48,6 +48,19 @@ err() {
   printf '[service][error] %s\n' "$*" >&2
 }
 
+ensure_tty() {
+  if [ -t 0 ] && [ -t 1 ]; then
+    return
+  fi
+  if [ -r /dev/tty ]; then
+    exec < /dev/tty
+    exec > /dev/tty
+    return
+  fi
+  err "偵測到非互動環境，請改用環境變數（CALLMESH_API_KEY / TMAG_ARGS）傳入設定。"
+  exit 1
+}
+
 usage() {
   cat <<'EOF'
 用法: scripts/manage-service-linux.sh [子指令]
@@ -328,15 +341,7 @@ prompt_api_key() {
   fi
 
   # 若非互動環境（例如 curl | bash），嘗試從 /dev/tty 讀取；若失敗請使用環境變數
-  if ! [ -t 0 ] && ! [ -t 1 ]; then
-    if [ -r /dev/tty ]; then
-      exec < /dev/tty
-      exec > /dev/tty
-    else
-      err "偵測到非互動環境，請以環境變數 CALLMESH_API_KEY 傳入。"
-      exit 1
-    fi
-  fi
+  ensure_tty
 
   while [ -z "$api_key" ]; do
     read -r -s -p "請輸入 CallMesh API Key: " api_key
@@ -355,28 +360,46 @@ prompt_args() {
   local default_port="4403"
   local default_serial=""
   local default_baud="115200"
+  ensure_tty
 
   # 從既有 TMAG_ARGS 嘗試抓取預設值
-  if [[ "$existing" =~ serial:///?([^[:space:]]+) ]]; then
-    default_mode="serial"
-    default_serial="${BASH_REMATCH[1]}"
-  fi
-  local host_val port_val baud_val
-  host_val="$(awk '{for(i=1;i<=NF;i++){if($i=="--host" && (i+1)<=NF){print $(i+1); exit}}}' <<<"$existing")"
-  port_val="$(awk '{for(i=1;i<=NF;i++){if($i=="--port" && (i+1)<=NF){print $(i+1); exit}}}' <<<"$existing")"
-  baud_val="$(awk '{for(i=1;i<=NF;i++){if($i=="--serial-baud" && (i+1)<=NF){print $(i+1); exit}}}' <<<"$existing")"
-  if [ -n "$host_val" ] && [[ "$host_val" != serial://* ]]; then
-    default_host="$host_val"
-  fi
-  if [ -n "$port_val" ]; then
-    default_port="$port_val"
-  fi
-  if [ -n "$baud_val" ]; then
-    default_baud="$baud_val"
-  fi
-
-  local filtered_extra
-  filtered_extra="$(echo " $existing " | sed -E 's/ --host [^ ]+//g; s/ --port [^ ]+//g; s/ --serial-baud [^ ]+//g; s/ serial:\\/\\/[^ ]+//g' | xargs || true)"
+  local -a tokens extras
+  read -r -a tokens <<<"$existing"
+  local i=0
+  while [ $i -lt ${#tokens[@]} ]; do
+    local t="${tokens[$i]}"
+    case "$t" in
+      --host)
+        i=$((i+1))
+        local hv="${tokens[$i]:-}"
+        if [[ "$hv" == serial://* ]]; then
+          default_mode="serial"
+          default_serial="${hv#serial://}"
+        elif [ -n "$hv" ]; then
+          default_host="$hv"
+        fi
+        ;;
+      --port)
+        i=$((i+1))
+        local pv="${tokens[$i]:-}"
+        [ -n "$pv" ] && default_port="$pv"
+        ;;
+      --serial-baud)
+        i=$((i+1))
+        local bv="${tokens[$i]:-}"
+        [ -n "$bv" ] && default_baud="$bv"
+        ;;
+      serial://*)
+        default_mode="serial"
+        default_serial="${t#serial://}"
+        ;;
+      *)
+        extras+=("$t")
+        ;;
+    esac
+    i=$((i+1))
+  done
+  local filtered_extra="${extras[*]:-}"
 
   local default_mode_num="1"
   [ "$default_mode" = "serial" ] && default_mode_num="2"
