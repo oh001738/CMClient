@@ -380,9 +380,9 @@ prompt_args() {
 
   local default_mode_num="1"
   [ "$default_mode" = "serial" ] && default_mode_num="2"
-  echo "選擇連線模式："
-  echo "  1) TCP/IP (預設)"
-  echo "  2) Serial（會列出 /dev/ttyUSB* / /dev/ttyACM* / /dev/ttyS* / /dev/ttyAMA*）"
+  echo "選擇連線模式：" >&2
+  echo "  1) TCP/IP (預設)" >&2
+  echo "  2) Serial（會列出 /dev/ttyUSB* / /dev/ttyACM* / /dev/ttyS* / /dev/ttyAMA*）" >&2
   read -r -p "請輸入 1 或 2 [${default_mode_num}]: " mode_choice
   local mode="$default_mode"
   case "$mode_choice" in
@@ -398,7 +398,7 @@ prompt_args() {
     port_input="${port_input:-$default_port}"
     base_args="--host ${host_input} --port ${port_input}"
   else
-    echo "可用 Serial 裝置："
+    echo "可用 Serial 裝置：" >&2
     local ports=()
     for pat in /dev/ttyUSB* /dev/ttyACM* /dev/ttyS* /dev/ttyAMA*; do
       for p in $pat; do
@@ -406,11 +406,11 @@ prompt_args() {
       done
     done
     if [ "${#ports[@]}" -eq 0 ]; then
-      echo "  (未找到常見裝置，請手動輸入路徑)"
+      echo "  (未找到常見裝置，請手動輸入路徑)" >&2
     else
       local idx=1
       for p in "${ports[@]}"; do
-        echo "  $idx) $p"
+        echo "  $idx) $p" >&2
         idx=$((idx+1))
       done
     fi
@@ -426,7 +426,7 @@ prompt_args() {
     base_args="--host serial://${serial_choice} --serial-baud ${baud_input}"
   fi
 
-  echo "可選: 額外 CLI 參數（例如: --web-ui），目前為: ${filtered_extra}"
+  echo "可選: 額外 CLI 參數（例如: --web-ui），目前為: ${filtered_extra}" >&2
   read -r -p "其他參數 (留空維持目前設定): " extra_input
   if [ -n "$extra_input" ]; then
     extra_args="$extra_input"
