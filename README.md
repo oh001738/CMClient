@@ -188,6 +188,7 @@ npx pkg src/index.js \
 - 設定檔：`/etc/callmesh/callmesh.env`（含 `CALLMESH_API_KEY`、`TMAG_ARGS`）
 - 服務名稱：`callmesh-client.service`
 - 查看最近 log：`bash scripts/manage-service-linux.sh logs 200`
+- 安裝時可選擇 TCP/IP 或 Serial；選 Serial 時會列出 /dev/ttyUSB* / /dev/ttyACM* / /dev/ttyS* / /dev/ttyAMA* 供選擇，並可輸入自訂路徑與鮑率
 - 全自動一行安裝（安裝依賴 + 建立服務，會互動詢問 API Key）：  
   `bash -c "git clone https://github.com/toodi0418/CMClient.git && cd CMClient && bash scripts/install-linux.sh && bash scripts/manage-service-linux.sh install"`
 

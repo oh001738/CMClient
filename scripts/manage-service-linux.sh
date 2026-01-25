@@ -2,7 +2,7 @@
 
 # Interactive systemd service manager for CMClient (CallMesh APRS Gateway).
 # Features:
-# - Prompt for CallMesh API Key and optional CLI args
+# - Prompt for CallMesh API Key與連線方式（TCP/IP 或 Serial 選單）
 # - Install/reinstall service with autostart
 # - Update API Key only
 # - Start/stop/restart/status/enable/disable
@@ -90,10 +90,92 @@ prompt_api_key() {
 }
 
 prompt_args() {
-  local args_default="${1:-}"
-  echo "可選: 輸入額外 CLI 參數（例如: --host 127.0.0.1 --port 4403 --web-ui）"
-  read -r -p "TMAG_ARGS (${args_default}): " extra_args
-  echo "${extra_args:-$args_default}"
+  local existing="${1:-}"
+  local default_mode="tcp"
+  local default_host="127.0.0.1"
+  local default_port="4403"
+  local default_serial=""
+  local default_baud="115200"
+
+  # 從既有 TMAG_ARGS 嘗試抓取預設值
+  if [[ "$existing" == *"serial://"* ]]; then
+    default_mode="serial"
+    default_serial="$(echo "$existing" | sed -n 's/.*serial:\\/\\/\\/?\\([^[:space:]]*\\).*/\\1/p')"
+  fi
+  local host_val port_val baud_val
+  host_val="$(awk '{for(i=1;i<=NF;i++){if($i=="--host" && (i+1)<=NF){print $(i+1); exit}}}' <<<"$existing")"
+  port_val="$(awk '{for(i=1;i<=NF;i++){if($i=="--port" && (i+1)<=NF){print $(i+1); exit}}}' <<<"$existing")"
+  baud_val="$(awk '{for(i=1;i<=NF;i++){if($i=="--serial-baud" && (i+1)<=NF){print $(i+1); exit}}}' <<<"$existing")"
+  if [ -n "$host_val" ] && [[ "$host_val" != serial://* ]]; then
+    default_host="$host_val"
+  fi
+  if [ -n "$port_val" ]; then
+    default_port="$port_val"
+  fi
+  if [ -n "$baud_val" ]; then
+    default_baud="$baud_val"
+  fi
+
+  local filtered_extra
+  filtered_extra="$(echo " $existing " | sed -E 's/ --host [^ ]+//g; s/ --port [^ ]+//g; s/ --serial-baud [^ ]+//g; s/ serial:\\/\\/[^ ]+//g' | xargs || true)"
+
+  local default_mode_num="1"
+  [ "$default_mode" = "serial" ] && default_mode_num="2"
+  echo "選擇連線模式："
+  echo "  1) TCP/IP (預設)"
+  echo "  2) Serial（會列出 /dev/ttyUSB* / /dev/ttyACM* / /dev/ttyS* / /dev/ttyAMA*）"
+  read -r -p "請輸入 1 或 2 [${default_mode_num}]: " mode_choice
+  local mode="$default_mode"
+  case "$mode_choice" in
+    2) mode="serial" ;;
+    1) mode="tcp" ;;
+  esac
+
+  local base_args extra_args=""
+  if [ "$mode" = "tcp" ]; then
+    read -r -p "TCP Host [${default_host}]: " host_input
+    read -r -p "TCP Port [${default_port}]: " port_input
+    host_input="${host_input:-$default_host}"
+    port_input="${port_input:-$default_port}"
+    base_args="--host ${host_input} --port ${port_input}"
+  else
+    echo "可用 Serial 裝置："
+    local ports=()
+    for pat in /dev/ttyUSB* /dev/ttyACM* /dev/ttyS* /dev/ttyAMA*; do
+      for p in $pat; do
+        [ -e "$p" ] && ports+=("$p")
+      done
+    done
+    if [ "${#ports[@]}" -eq 0 ]; then
+      echo "  (未找到常見裝置，請手動輸入路徑)"
+    else
+      local idx=1
+      for p in "${ports[@]}"; do
+        echo "  $idx) $p"
+        idx=$((idx+1))
+      done
+    fi
+    local serial_default_display="$default_serial"
+    [ -z "$serial_default_display" ] && serial_default_display="${ports[0]:-}"
+    read -r -p "選擇序號或直接輸入裝置路徑 [${serial_default_display}]: " serial_choice
+    if [[ "$serial_choice" =~ ^[0-9]+$ ]] && [ "$serial_choice" -ge 1 ] && [ "$serial_choice" -le "${#ports[@]}" ]; then
+      serial_choice="${ports[$((serial_choice-1))]}"
+    fi
+    serial_choice="${serial_choice:-$serial_default_display}"
+    read -r -p "Serial 鮑率 [${default_baud}]: " baud_input
+    baud_input="${baud_input:-$default_baud}"
+    base_args="--host serial://${serial_choice} --serial-baud ${baud_input}"
+  fi
+
+  echo "可選: 額外 CLI 參數（例如: --web-ui），目前為: ${filtered_extra}"
+  read -r -p "其他參數 (留空維持目前設定): " extra_input
+  if [ -n "$extra_input" ]; then
+    extra_args="$extra_input"
+  elif [ -n "$filtered_extra" ]; then
+    extra_args="$filtered_extra"
+  fi
+
+  echo "$(printf '%s %s' "$base_args" "$extra_args" | xargs)"
 }
 
 write_env_file() {
