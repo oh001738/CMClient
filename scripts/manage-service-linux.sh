@@ -23,6 +23,7 @@ REQUIRED_NODE_MAJOR=22
 RUN_AS_USER="${RUN_AS_USER:-${SUDO_USER:-$(id -un)}}"
 SERVICE_USER_VALUE="${SERVICE_USER:-$RUN_AS_USER}"
 UPDATE_SCHEDULE="${UPDATE_SCHEDULE:-*-*-* 04:00:00}"
+NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
 
 log() {
   printf '[service] %s\n' "$*"
@@ -119,11 +120,45 @@ install_packages() {
   esac
 }
 
+load_env_settings() {
+  if [ -f "$ENV_FILE" ]; then
+    # shellcheck disable=SC1090
+    source "$ENV_FILE"
+    SERVICE_USER_VALUE="${SERVICE_USER:-$SERVICE_USER_VALUE}"
+  fi
+}
+
+load_nvm_if_available() {
+  local candidates=()
+  [ -n "$NVM_DIR" ] && candidates+=("$NVM_DIR")
+  if [ -n "${SERVICE_USER_VALUE:-}" ]; then
+    if [ "$SERVICE_USER_VALUE" = "root" ]; then
+      candidates+=("/root/.nvm")
+    else
+      candidates+=("/home/${SERVICE_USER_VALUE}/.nvm")
+    fi
+  fi
+  candidates+=("$HOME/.nvm" "/usr/local/nvm")
+  for d in "${candidates[@]}"; do
+    if [ -s "$d/nvm.sh" ]; then
+      export NVM_DIR="$d"
+      # shellcheck disable=SC1090
+      . "$d/nvm.sh"
+      return 0
+    fi
+  done
+  return 1
+}
+
 check_node() {
+  load_env_settings
+  load_nvm_if_available || true
+  NODE_BIN="$(command -v node || true)"
   if [ -z "$NODE_BIN" ]; then
     log "找不到 node，嘗試執行 scripts/install-linux.sh 安裝 Node.js ${REQUIRED_NODE_MAJOR}+ ..."
     if [ -x "${PROJECT_ROOT}/scripts/install-linux.sh" ]; then
       bash "${PROJECT_ROOT}/scripts/install-linux.sh"
+      load_nvm_if_available || true
       NODE_BIN="$(command -v node || true)"
     fi
   fi
@@ -135,6 +170,7 @@ check_node() {
       log "偵測到 Node.js v${major}，低於需求 (${REQUIRED_NODE_MAJOR}+)，嘗試升級..."
       if [ -x "${PROJECT_ROOT}/scripts/install-linux.sh" ]; then
         bash "${PROJECT_ROOT}/scripts/install-linux.sh"
+        load_nvm_if_available || true
         NODE_BIN="$(command -v node || true)"
         major="$("$NODE_BIN" -v | sed 's/^v//' | cut -d. -f1)"
       fi
@@ -194,14 +230,6 @@ ensure_clean_worktree() {
 
 fetch_remote() {
   run_as_service_user git -C "$PROJECT_ROOT" fetch --tags origin main
-}
-
-load_env_settings() {
-  if [ -f "$ENV_FILE" ]; then
-    # shellcheck disable=SC1090
-    source "$ENV_FILE"
-    SERVICE_USER_VALUE="${SERVICE_USER:-$SERVICE_USER_VALUE}"
-  fi
 }
 
 check_update_status() {
