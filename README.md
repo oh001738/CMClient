@@ -179,6 +179,18 @@ npx pkg src/index.js \
   --output tmag-cli-linux-arm64
 ```
 
+### Linux systemd 服務常駐
+
+若要以服務方式常駐並開機自動啟動，可使用 `scripts/manage-service-linux.sh`（會詢問 API Key，可重裝、重設 Key 或解除安裝）。
+
+- 互動式選單：`bash scripts/manage-service-linux.sh`
+- 直接指令：`bash scripts/manage-service-linux.sh install|set-key|start|stop|restart|status|enable|disable|logs|uninstall`
+- 設定檔：`/etc/callmesh/callmesh.env`（含 `CALLMESH_API_KEY`、`TMAG_ARGS`）
+- 服務名稱：`callmesh-client.service`
+- 查看最近 log：`bash scripts/manage-service-linux.sh logs 200`
+- 全自動一行安裝（安裝依賴 + 建立服務，會互動詢問 API Key）：  
+  `bash -c "git clone https://github.com/toodi0418/CMClient.git && cd CMClient && bash scripts/install-linux.sh && bash scripts/manage-service-linux.sh install"`
+
 ---
 
 ## 4. CLI 快速上手
@@ -262,7 +274,7 @@ node src/index.js callmesh sync \
 
 - **改善動機**：Meshtastic 網路偶爾塞住，封包可能延遲 30 秒到 10 分鐘才送到另一個站台。若每站都再次 uplink，同一筆位置會在 APRS-IS 上「倒退」，也浪費配額。
 - **三層快取**（同步寫入 `callmesh-data.sqlite`，重啟會重新載入並套用 TTL）  
-  1. `aprsPacketCache` / `aprsCallsignSummary`：記錄 3 小時內 APRS-IS feed 已出現的 payload／呼號，只要再看到相同呼號＋payload，就標記 `seen-on-feed` 並跳過上傳。  
+  1. `aprsPacketCache` / `aprsCallsignSummary`：記錄 24 小時內 APRS-IS feed 已出現的 payload／呼號，只要再看到相同呼號＋payload，就標記 `seen-on-feed` 並跳過上傳。  
   2. `aprsLocalTxHistory`：保留本地 uplink 的 payload 30 秒，用來擋掉 UI/排程誤觸造成的重送。  
   3. `aprsLastPositionDigest`：同一 Mesh ID 30 秒內座標＋符號＋註解完全相同就不再上傳，避免 GPS 靜止時不停重複。  
 - **使用方式**：任何實例都可開 `http://<host>:7080/debug` 檢視 `aprsDedup`，快速判斷某筆為何被擋。例如 `packetCache` 命中代表 feed 已有、`localTxHistory` 命中代表 30 秒內剛由本機上傳；這些欄位同時鏡射 `callmesh-data.sqlite` 內的 `aprs_*` 表，可跨重啟追蹤。  
