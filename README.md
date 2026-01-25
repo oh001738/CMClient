@@ -195,6 +195,7 @@ npx pkg src/index.js \
 - 全自動一行安裝（安裝依賴 + 建立服務，會互動詢問 API Key，會自動處理已存在目錄）：  
   `bash -c "curl -fsSL https://raw.githubusercontent.com/toodi0418/CMClient/main/scripts/bootstrap-linux.sh | bash"`  
   - 自訂目錄：`TMAG_DIR=/opt/CMClient`；自訂分支：`TMAG_BRANCH=main`
+  - 若無法互動輸入，可提前設定 `CALLMESH_API_KEY=<你的 Key>`
 
 ---
 

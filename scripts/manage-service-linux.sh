@@ -300,7 +300,29 @@ perform_update() {
 }
 
 prompt_api_key() {
-  local api_key=""
+  local api_key="${CALLMESH_API_KEY:-}"
+  if [ -z "$api_key" ] && [ -f "$ENV_FILE" ]; then
+    # shellcheck disable=SC1090
+    source "$ENV_FILE"
+    api_key="${CALLMESH_API_KEY:-$api_key}"
+  fi
+
+  if [ -n "$api_key" ]; then
+    echo "$api_key"
+    return
+  fi
+
+  # 若非互動環境（例如 curl | bash），嘗試從 /dev/tty 讀取；若失敗請使用環境變數
+  if ! [ -t 0 ] && ! [ -t 1 ]; then
+    if [ -r /dev/tty ]; then
+      exec < /dev/tty
+      exec > /dev/tty
+    else
+      err "偵測到非互動環境，請以環境變數 CALLMESH_API_KEY 傳入。"
+      exit 1
+    fi
+  fi
+
   while [ -z "$api_key" ]; do
     read -r -s -p "請輸入 CallMesh API Key: " api_key
     echo
