@@ -342,9 +342,9 @@ prompt_args() {
   local default_baud="115200"
 
   # 從既有 TMAG_ARGS 嘗試抓取預設值
-  if [[ "$existing" == *"serial://"* ]]; then
+  if [[ "$existing" =~ serial:///?([^[:space:]]+) ]]; then
     default_mode="serial"
-    default_serial="$(echo "$existing" | sed -n 's/.*serial:\\/\\/\\/?\\([^[:space:]]*\\).*/\\1/p')"
+    default_serial="${BASH_REMATCH[1]}"
   fi
   local host_val port_val baud_val
   host_val="$(awk '{for(i=1;i<=NF;i++){if($i=="--host" && (i+1)<=NF){print $(i+1); exit}}}' <<<"$existing")"
@@ -599,16 +599,81 @@ auto_update_status() {
   $sudo_cmd systemctl list-timers --no-pager | grep "$UPDATE_SERVICE_NAME" || true
 }
 
-start_service() { require_systemd; "$(sudo_prefix)" systemctl start "$SERVICE_NAME"; }
-stop_service() { require_systemd; "$(sudo_prefix)" systemctl stop "$SERVICE_NAME"; }
-restart_service() { require_systemd; "$(sudo_prefix)" systemctl restart "$SERVICE_NAME"; }
-status_service() { require_systemd; "$(sudo_prefix)" systemctl status --no-pager "$SERVICE_NAME" || true; }
-enable_service() { require_systemd; "$(sudo_prefix)" systemctl enable "$SERVICE_NAME"; }
-disable_service() { require_systemd; "$(sudo_prefix)" systemctl disable "$SERVICE_NAME"; }
+start_service() {
+  require_systemd
+  local sudo_cmd
+  sudo_cmd="$(sudo_prefix)"
+  if [ -n "$sudo_cmd" ]; then
+    $sudo_cmd systemctl start "$SERVICE_NAME"
+  else
+    systemctl start "$SERVICE_NAME"
+  fi
+}
+
+stop_service() {
+  require_systemd
+  local sudo_cmd
+  sudo_cmd="$(sudo_prefix)"
+  if [ -n "$sudo_cmd" ]; then
+    $sudo_cmd systemctl stop "$SERVICE_NAME"
+  else
+    systemctl stop "$SERVICE_NAME"
+  fi
+}
+
+restart_service() {
+  require_systemd
+  local sudo_cmd
+  sudo_cmd="$(sudo_prefix)"
+  if [ -n "$sudo_cmd" ]; then
+    $sudo_cmd systemctl restart "$SERVICE_NAME"
+  else
+    systemctl restart "$SERVICE_NAME"
+  fi
+}
+
+status_service() {
+  require_systemd
+  local sudo_cmd
+  sudo_cmd="$(sudo_prefix)"
+  if [ -n "$sudo_cmd" ]; then
+    $sudo_cmd systemctl status --no-pager "$SERVICE_NAME" || true
+  else
+    systemctl status --no-pager "$SERVICE_NAME" || true
+  fi
+}
+
+enable_service() {
+  require_systemd
+  local sudo_cmd
+  sudo_cmd="$(sudo_prefix)"
+  if [ -n "$sudo_cmd" ]; then
+    $sudo_cmd systemctl enable "$SERVICE_NAME"
+  else
+    systemctl enable "$SERVICE_NAME"
+  fi
+}
+
+disable_service() {
+  require_systemd
+  local sudo_cmd
+  sudo_cmd="$(sudo_prefix)"
+  if [ -n "$sudo_cmd" ]; then
+    $sudo_cmd systemctl disable "$SERVICE_NAME"
+  else
+    systemctl disable "$SERVICE_NAME"
+  fi
+}
 logs_service() {
   require_systemd
   local lines="${1:-200}"
-  "$(sudo_prefix)" journalctl -u "$SERVICE_NAME" -n "$lines" --no-pager
+  local sudo_cmd
+  sudo_cmd="$(sudo_prefix)"
+  if [ -n "$sudo_cmd" ]; then
+    $sudo_cmd journalctl -u "$SERVICE_NAME" -n "$lines" --no-pager
+  else
+    journalctl -u "$SERVICE_NAME" -n "$lines" --no-pager
+  fi
 }
 
 menu() {
