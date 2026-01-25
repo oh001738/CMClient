@@ -6,17 +6,23 @@
 # - Install/reinstall service with autostart
 # - Update API Key only
 # - Start/stop/restart/status/enable/disable
+# - Check/update client and manage auto-update timer
 # - Uninstall service and clean artifacts
 set -euo pipefail
 
 SERVICE_NAME="callmesh-client"
 UNIT_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
+UPDATE_SERVICE_NAME="${SERVICE_NAME}-update"
+UPDATE_SERVICE_PATH="/etc/systemd/system/${UPDATE_SERVICE_NAME}.service"
+UPDATE_TIMER_PATH="/etc/systemd/system/${UPDATE_SERVICE_NAME}.timer"
 ENV_DIR="/etc/callmesh"
 ENV_FILE="${ENV_DIR}/callmesh.env"
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NODE_BIN="$(command -v node || true)"
 REQUIRED_NODE_MAJOR=22
-RUN_AS_USER="${SUDO_USER:-$(id -un)}"
+RUN_AS_USER="${RUN_AS_USER:-${SUDO_USER:-$(id -un)}}"
+SERVICE_USER_VALUE="${SERVICE_USER:-$RUN_AS_USER}"
+UPDATE_SCHEDULE="${UPDATE_SCHEDULE:-*-*-* 04:00:00}"
 
 log() {
   printf '[service] %s\n' "$*"
@@ -34,6 +40,11 @@ usage() {
   install      安裝/重裝服務並設定 API Key（啟用開機自動啟動）
   set-key      重新輸入 API Key 並重啟服務
   logs [N]     顯示最近 N 行 log（預設 200）
+  check-update 檢查是否有新版（對照 origin/main）
+  update       下載更新並重新安裝依賴後重啟服務（需乾淨工作目錄）
+  auto-update-enable   啟用自動更新（建立 systemd timer，每天 04:00，含隨機延遲）
+  auto-update-disable  停用自動更新
+  auto-update-status   查看自動更新計畫
   start        啟動服務
   stop         停止服務
   restart      重啟服務
@@ -74,6 +85,115 @@ check_node() {
   if [ "$major" -lt "$REQUIRED_NODE_MAJOR" ]; then
     err "偵測到 Node.js v${major}，請升級到 ${REQUIRED_NODE_MAJOR} 或以上版本。"
     exit 1
+  fi
+}
+
+require_git() {
+  if ! command -v git >/dev/null 2>&1; then
+    err "找不到 git，請先安裝後再試。"
+    exit 1
+  fi
+}
+
+run_as_service_user() {
+  local sudo_cmd=""
+  if [ "${EUID:-$(id -u)}" -eq 0 ] && [ "$SERVICE_USER_VALUE" != "root" ]; then
+    sudo_cmd="sudo -u $SERVICE_USER_VALUE -H"
+  fi
+  if [ -n "$sudo_cmd" ]; then
+    $sudo_cmd "$@"
+  else
+    "$@"
+  fi
+}
+
+ensure_clean_worktree() {
+  if ! run_as_service_user git -C "$PROJECT_ROOT" diff --quiet --ignore-submodules --; then
+    err "工作目錄有尚未提交的修改，請先處理後再更新。"
+    exit 1
+  fi
+  if ! run_as_service_user git -C "$PROJECT_ROOT" diff --cached --quiet --ignore-submodules --; then
+    err "索引中有待提交變更，請先處理後再更新。"
+    exit 1
+  fi
+}
+
+fetch_remote() {
+  run_as_service_user git -C "$PROJECT_ROOT" fetch --tags origin main
+}
+
+load_env_settings() {
+  if [ -f "$ENV_FILE" ]; then
+    # shellcheck disable=SC1090
+    source "$ENV_FILE"
+    SERVICE_USER_VALUE="${SERVICE_USER:-$SERVICE_USER_VALUE}"
+  fi
+}
+
+check_update_status() {
+  require_git
+  load_env_settings
+  fetch_remote
+  local local_head remote_head base
+  local_head="$(run_as_service_user git -C "$PROJECT_ROOT" rev-parse HEAD)"
+  remote_head="$(run_as_service_user git -C "$PROJECT_ROOT" rev-parse origin/main)"
+  base="$(run_as_service_user git -C "$PROJECT_ROOT" merge-base HEAD origin/main)"
+
+  if [ "$local_head" = "$remote_head" ]; then
+    log "目前已是最新版本 (${local_head})."
+    return 0
+  fi
+
+  if [ "$local_head" = "$base" ]; then
+    log "有可用更新，最新版本 ${remote_head}。"
+    return 1
+  fi
+
+  if [ "$remote_head" = "$base" ]; then
+    log "本地有尚未推送的提交（local ${local_head}），請先處理。"
+    return 2
+  fi
+
+  log "本地與遠端已分歧，請手動檢查。local ${local_head}, remote ${remote_head}, base ${base}"
+  return 3
+}
+
+perform_update() {
+  require_systemd
+  require_git
+  check_node
+  load_env_settings
+  ensure_clean_worktree
+  fetch_remote
+
+  local local_head remote_head base
+  local_head="$(run_as_service_user git -C "$PROJECT_ROOT" rev-parse HEAD)"
+  remote_head="$(run_as_service_user git -C "$PROJECT_ROOT" rev-parse origin/main)"
+  base="$(run_as_service_user git -C "$PROJECT_ROOT" merge-base HEAD origin/main)"
+
+  if [ "$local_head" = "$remote_head" ]; then
+    log "已是最新版本。"
+    return 0
+  fi
+
+  if [ "$local_head" != "$base" ]; then
+    err "本地有未推送提交或分歧，為安全起見不自動更新。"
+    exit 1
+  fi
+
+  log "套用更新（fast-forward）..."
+  run_as_service_user git -C "$PROJECT_ROOT" pull --ff-only origin main
+
+  log "安裝依賴..."
+  run_as_service_user npm install --prefix "$PROJECT_ROOT"
+
+  if [ "${1:-1}" -eq 1 ]; then
+    log "重啟服務 ${SERVICE_NAME}..."
+    local sudo_cmd
+    sudo_cmd="$(sudo_prefix)"
+    $sudo_cmd systemctl restart "$SERVICE_NAME"
+  else
+    log "更新完成，尚未重啟服務。"
   fi
 }
 
@@ -181,12 +301,14 @@ prompt_args() {
 write_env_file() {
   local api_key="$1"
   local tmag_args="$2"
+  local service_user="$3"
   local sudo_cmd
   sudo_cmd="$(sudo_prefix)"
   $sudo_cmd mkdir -p "$ENV_DIR"
   $sudo_cmd tee "$ENV_FILE" >/dev/null <<EOF
 CALLMESH_API_KEY="${api_key}"
 TMAG_ARGS="${tmag_args}"
+SERVICE_USER="${service_user}"
 NODE_ENV=production
 EOF
   $sudo_cmd chmod 600 "$ENV_FILE"
@@ -204,7 +326,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=${RUN_AS_USER}
+User=${SERVICE_USER_VALUE}
 WorkingDirectory=${PROJECT_ROOT}
 EnvironmentFile=${ENV_FILE}
 ExecStart=${NODE_BIN} ${PROJECT_ROOT}/src/index.js \$TMAG_ARGS
@@ -218,18 +340,61 @@ EOF
   log "已寫入 ${UNIT_PATH}"
 }
 
+write_update_units() {
+  load_env_settings
+  local sudo_cmd
+  sudo_cmd="$(sudo_prefix)"
+  $sudo_cmd tee "$UPDATE_SERVICE_PATH" >/dev/null <<EOF
+[Unit]
+Description=CallMesh Client auto updater
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=${PROJECT_ROOT}
+Environment=RUN_AS_USER=${SERVICE_USER_VALUE}
+Environment=SERVICE_USER=${SERVICE_USER_VALUE}
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/bin/bash -lc '${PROJECT_ROOT}/scripts/manage-service-linux.sh updater-task'
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  $sudo_cmd tee "$UPDATE_TIMER_PATH" >/dev/null <<EOF
+[Unit]
+Description=CallMesh Client auto update timer
+
+[Timer]
+OnCalendar=${UPDATE_SCHEDULE}
+RandomizedDelaySec=1800
+Persistent=true
+Unit=${UPDATE_SERVICE_NAME}.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+  $sudo_cmd chmod 644 "$UPDATE_SERVICE_PATH" "$UPDATE_TIMER_PATH"
+  log "已寫入 ${UPDATE_SERVICE_PATH} 與 ${UPDATE_TIMER_PATH}"
+}
+
 install_service() {
   require_systemd
   check_node
-  local api_key tmag_args existing_args=""
+  local api_key tmag_args existing_args="" service_user="$SERVICE_USER_VALUE"
   if [ -f "$ENV_FILE" ]; then
     # shellcheck disable=SC1090
     source "$ENV_FILE"
     existing_args="${TMAG_ARGS:-}"
+    service_user="${SERVICE_USER:-$SERVICE_USER_VALUE}"
   fi
   api_key="$(prompt_api_key)"
   tmag_args="$(prompt_args "$existing_args")"
-  write_env_file "$api_key" "$tmag_args"
+  SERVICE_USER_VALUE="$service_user"
+  write_env_file "$api_key" "$tmag_args" "$SERVICE_USER_VALUE"
 
   write_unit_file
 
@@ -242,7 +407,7 @@ install_service() {
 
 set_key() {
   require_systemd
-  local api_key tmag_args
+  local api_key tmag_args service_user="$SERVICE_USER_VALUE"
   api_key="$(prompt_api_key)"
   # 保留現有 CLI 參數
   tmag_args=""
@@ -250,8 +415,9 @@ set_key() {
     # shellcheck disable=SC1090
     source "$ENV_FILE"
     tmag_args="${TMAG_ARGS:-}"
+    service_user="${SERVICE_USER:-$SERVICE_USER_VALUE}"
   fi
-  write_env_file "$api_key" "$tmag_args"
+  write_env_file "$api_key" "$tmag_args" "$service_user"
   local sudo_cmd
   sudo_cmd="$(sudo_prefix)"
   $sudo_cmd systemctl restart "$SERVICE_NAME"
@@ -275,6 +441,38 @@ uninstall_service() {
       log "已取消。"
       ;;
   esac
+}
+
+auto_update_enable() {
+  require_systemd
+  require_git
+  write_update_units
+  local sudo_cmd
+  sudo_cmd="$(sudo_prefix)"
+  $sudo_cmd systemctl daemon-reload
+  $sudo_cmd systemctl enable --now "$UPDATE_TIMER_PATH" >/dev/null 2>&1 || $sudo_cmd systemctl enable --now "$UPDATE_SERVICE_NAME".timer
+  log "自動更新已啟用（排程：${UPDATE_SCHEDULE}，隨機延遲最多 1800 秒）。"
+}
+
+auto_update_disable() {
+  require_systemd
+  local sudo_cmd
+  sudo_cmd="$(sudo_prefix)"
+  $sudo_cmd systemctl disable --now "$UPDATE_SERVICE_NAME".timer || true
+  $sudo_cmd systemctl stop "$UPDATE_SERVICE_NAME".service || true
+  $sudo_cmd rm -f "$UPDATE_SERVICE_PATH" "$UPDATE_TIMER_PATH"
+  $sudo_cmd systemctl daemon-reload
+  log "已停用自動更新並移除 timer/service。"
+}
+
+auto_update_status() {
+  require_systemd
+  local sudo_cmd
+  sudo_cmd="$(sudo_prefix)"
+  echo "--- ${UPDATE_SERVICE_NAME}.timer 狀態 ---"
+  $sudo_cmd systemctl status --no-pager "$UPDATE_SERVICE_NAME".timer || true
+  echo "--- 下一次排程 ---"
+  $sudo_cmd systemctl list-timers --no-pager | grep "$UPDATE_SERVICE_NAME" || true
 }
 
 start_service() { require_systemd; "$(sudo_prefix)" systemctl start "$SERVICE_NAME"; }
@@ -301,7 +499,12 @@ menu() {
   echo "8) 停用開機自動啟動"
   echo "9) 解除安裝"
   echo "10) 查看最近 log"
-  read -r -p "選擇動作 [1-10]: " choice
+  echo "11) 檢查更新"
+  echo "12) 更新並重啟服務"
+  echo "13) 啟用自動更新（每日）"
+  echo "14) 停用自動更新"
+  echo "15) 查看自動更新狀態"
+  read -r -p "選擇動作 [1-15]: " choice
   case "$choice" in
     1) install_service ;;
     2) set_key ;;
@@ -313,6 +516,11 @@ menu() {
     8) disable_service ;;
     9) uninstall_service ;;
     10) logs_service ;;
+    11) check_update_status ;;
+    12) perform_update ;;
+    13) auto_update_enable ;;
+    14) auto_update_disable ;;
+    15) auto_update_status ;;
     *) err "無效選項"; exit 1 ;;
   esac
 }
@@ -322,6 +530,11 @@ main() {
   case "$cmd" in
     install) install_service ;;
     set-key) set_key ;;
+    check-update) check_update_status ;;
+    update) perform_update ;;
+    auto-update-enable) auto_update_enable ;;
+    auto-update-disable) auto_update_disable ;;
+    auto-update-status) auto_update_status ;;
     start) start_service ;;
     stop) stop_service ;;
     restart) restart_service ;;
@@ -330,6 +543,7 @@ main() {
     disable) disable_service ;;
     logs) shift || true; logs_service "$1" ;;
     uninstall) uninstall_service ;;
+    updater-task) perform_update ;;
     menu) menu ;;
     -h|--help) usage ;;
     *) err "未知指令：$cmd"; usage; exit 1 ;;
