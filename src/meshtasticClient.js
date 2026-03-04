@@ -75,6 +75,9 @@ class MeshtasticClient extends EventEmitter {
       serialOpenOptions: {},
       initialBacklogSuppressWindowMs: 15_000,
       initialBacklogSkewAllowanceMs: 5_000,
+      proxyEnabled: false,
+      proxyPort: 4403,
+      proxyHost: '127.0.0.1',
       ...options
     };
 
@@ -148,6 +151,9 @@ class MeshtasticClient extends EventEmitter {
     this._serialConnectTimer = null;
     this._initialBacklogFilterActive = false;
     this._initialBacklogFilterDeadline = null;
+    this._proxyServer = null;
+    this._proxyClients = new Set();
+    this._proxyPortActive = null;
 
     this._loadRelayStatsFromDisk();
   }
@@ -252,26 +258,26 @@ class MeshtasticClient extends EventEmitter {
     }
     const candidates = Array.from(matches);
     const guessResult = this._guessRelayCandidate(candidates, { snr, rssi });
-      if (guessResult) {
-        if (guessResult.nodeId != null) {
-          this._recordRelayTailCandidate(guessResult.nodeId);
-        }
-        let forceTailLabel = Boolean(guessResult.forceTailLabel);
-        if (!forceTailLabel && guessResult.nodeId != null) {
-          const normalizedCandidate = formatHexId(guessResult.nodeId >>> 0);
-          const hasNodeRecord = Boolean(this._getNodeDatabaseRecord(normalizedCandidate));
-          if (isTruncatedId && !hasNodeRecord) {
-            forceTailLabel = true;
-          }
-        } else if (!forceTailLabel && isTruncatedId) {
+    if (guessResult) {
+      if (guessResult.nodeId != null) {
+        this._recordRelayTailCandidate(guessResult.nodeId);
+      }
+      let forceTailLabel = Boolean(guessResult.forceTailLabel);
+      if (!forceTailLabel && guessResult.nodeId != null) {
+        const normalizedCandidate = formatHexId(guessResult.nodeId >>> 0);
+        const hasNodeRecord = Boolean(this._getNodeDatabaseRecord(normalizedCandidate));
+        if (isTruncatedId && !hasNodeRecord) {
           forceTailLabel = true;
         }
-        return {
-          ...guessResult,
-          tailNodeId: guessResult.tailNodeId ?? raw >>> 0,
-          forceTailLabel
-        };
+      } else if (!forceTailLabel && isTruncatedId) {
+        forceTailLabel = true;
       }
+      return {
+        ...guessResult,
+        tailNodeId: guessResult.tailNodeId ?? raw >>> 0,
+        forceTailLabel
+      };
+    }
     if (matches.size > 1) {
       const suffix = raw.toString(16).padStart(2, '0').toUpperCase();
       const labels = this._describeRelayCandidates(candidates);
@@ -809,6 +815,10 @@ class MeshtasticClient extends EventEmitter {
     } else {
       this._connectTcp();
     }
+
+    if (this.options.proxyEnabled && !this._proxyServer) {
+      this._startProxyServer();
+    }
   }
 
   stop() {
@@ -861,6 +871,18 @@ class MeshtasticClient extends EventEmitter {
       this._socket.destroy();
       this._socket = null;
     }
+
+    if (this._proxyServer) {
+      const server = this._proxyServer;
+      this._proxyServer = null;
+      this._proxyPortActive = null;
+      server.close();
+      for (const client of this._proxyClients) {
+        client.destroy();
+      }
+      this._proxyClients.clear();
+    }
+
     if (shouldNotifyDisconnect) {
       this._handleConnectionClosed();
     } else {
@@ -969,7 +991,10 @@ class MeshtasticClient extends EventEmitter {
       return;
     }
 
-    this._socket.on('data', (chunk) => this._decoder.push(chunk));
+    this._socket.on('data', (chunk) => {
+      this._decoder.push(chunk);
+      this._broadcastToProxyClients(chunk);
+    });
     this._socket.setTimeout(connectTimeoutMs);
     this._socket.once('timeout', handleConnectTimeout);
 
@@ -1045,7 +1070,10 @@ class MeshtasticClient extends EventEmitter {
       }
     };
 
-    port.on('data', (chunk) => this._decoder.push(chunk));
+    port.on('data', (chunk) => {
+      this._decoder.push(chunk);
+      this._broadcastToProxyClients(chunk);
+    });
 
     port.on('error', (err) => {
       this.emit('error', err);
@@ -1180,13 +1208,15 @@ class MeshtasticClient extends EventEmitter {
     this.emit('disconnected');
   }
 
-  _writeFrame(frame, callback) {
+  _writeFrame(frame, callback, excludeProxyClient = null) {
     if (!this._connected) {
       if (callback) {
         callback(new Error('connection not established'));
       }
       return;
     }
+
+    this._broadcastToProxyClients(frame, excludeProxyClient);
 
     if (this._transportType === 'serial') {
       if (!this._serialPort) {
@@ -1220,6 +1250,59 @@ class MeshtasticClient extends EventEmitter {
 
     if (callback) {
       callback(new Error('connection channel not available'));
+    }
+  }
+
+  _startProxyServer() {
+    const port = Number(this.options.proxyPort) || 4403;
+    const host = this.options.proxyHost || '127.0.0.1';
+
+    this._proxyServer = net.createServer((client) => {
+      const address = client.remoteAddress;
+      const portNum = client.remotePort;
+      const clientId = `${address}:${portNum}`;
+
+      this._proxyClients.add(client);
+      console.log(`[TCP Proxy] Client connected: ${clientId}`);
+
+      client.on('data', (chunk) => {
+        if (this._connected) {
+          this._writeFrame(chunk, null, client);
+        }
+      });
+
+      client.on('error', (err) => {
+        console.warn(`[TCP Proxy] Client error (${clientId}): ${err.message}`);
+      });
+
+      client.on('close', () => {
+        this._proxyClients.delete(client);
+        console.log(`[TCP Proxy] Client disconnected: ${clientId}`);
+      });
+    });
+
+    this._proxyServer.on('error', (err) => {
+      console.error(`[TCP Proxy] Server error: ${err.message}`);
+      this._proxyServer = null;
+      this._proxyPortActive = null;
+    });
+
+    this._proxyServer.listen(port, host, () => {
+      this._proxyPortActive = port;
+      console.log(`[TCP Proxy] Listening on ${host}:${port}`);
+    });
+  }
+
+  _broadcastToProxyClients(chunk, excludeClient = null) {
+    if (this._proxyClients.size === 0) return;
+    for (const client of this._proxyClients) {
+      if (client !== excludeClient && !client.destroyed) {
+        try {
+          client.write(chunk);
+        } catch (err) {
+          console.warn(`[TCP Proxy] Failed to write to client: ${err.message}`);
+        }
+      }
     }
   }
 
@@ -1317,35 +1400,35 @@ class MeshtasticClient extends EventEmitter {
           hwModel: user.hwModel || existing.hwModel,
           role: user.role || existing.role
         };
-    this.nodeMap.set(num, updated);
-    break;
-  }
-  case 'myInfo': {
-    const info = message.myInfo;
-    if (!info) break;
-    const num = info.myNodeNum >>> 0;
-    const existing = this.nodeMap.get(num) || {};
-    this.nodeMap.set(num, {
-      id: existing.id || formatHexId(num),
-      shortName: existing.shortName,
-      longName: existing.longName,
-      hwModel: existing.hwModel,
-      role: existing.role
-    });
-    const nodeInfo = this._formatNode(num);
-    this.emit('myInfo', {
-      raw: num,
-      node: nodeInfo
-    });
-    this._selfNodeId = num;
-    const normalizedSelf =
-      normalizeMeshId(
-        nodeInfo?.meshId ||
-          (typeof info?.myNodeId === 'string' ? info.myNodeId : null)
-      ) || formatHexId(num);
-    this._selfNodeNormalized = normalizedSelf;
-    break;
-  }
+        this.nodeMap.set(num, updated);
+        break;
+      }
+      case 'myInfo': {
+        const info = message.myInfo;
+        if (!info) break;
+        const num = info.myNodeNum >>> 0;
+        const existing = this.nodeMap.get(num) || {};
+        this.nodeMap.set(num, {
+          id: existing.id || formatHexId(num),
+          shortName: existing.shortName,
+          longName: existing.longName,
+          hwModel: existing.hwModel,
+          role: existing.role
+        });
+        const nodeInfo = this._formatNode(num);
+        this.emit('myInfo', {
+          raw: num,
+          node: nodeInfo
+        });
+        this._selfNodeId = num;
+        const normalizedSelf =
+          normalizeMeshId(
+            nodeInfo?.meshId ||
+            (typeof info?.myNodeId === 'string' ? info.myNodeId : null)
+          ) || formatHexId(num);
+        this._selfNodeNormalized = normalizedSelf;
+        break;
+      }
       default:
         break;
     }
@@ -1460,10 +1543,10 @@ class MeshtasticClient extends EventEmitter {
     const relayCandidate = resolveRelayCandidate(relayNodeId);
     let relayResult = relayCandidate
       ? {
-          nodeId: relayCandidate.nodeId,
-          guessed: relayCandidate.guessed,
-          reason: relayCandidate.reason
-        }
+        nodeId: relayCandidate.nodeId,
+        guessed: relayCandidate.guessed,
+        reason: relayCandidate.reason
+      }
       : null;
     let relayInfo = relayCandidate?.info ? { ...relayCandidate.info } : null;
 

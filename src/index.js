@@ -27,8 +27,8 @@ function getMessageLogPath() {
 function sanitizeStringArray(arr) {
   return Array.isArray(arr)
     ? arr
-        .map((line) => (typeof line === 'string' ? line.trim() : ''))
-        .filter(Boolean)
+      .map((line) => (typeof line === 'string' ? line.trim() : ''))
+      .filter(Boolean)
     : [];
 }
 
@@ -109,7 +109,7 @@ function createSummaryFileLogger(baseDir, { prefix = 'summary' } = {}) {
         ? Number(summary.timestampMs)
         : Date.now();
       writeChain = writeChain
-        .catch(() => {})
+        .catch(() => { })
         .then(async () => {
           const filePath = await ensureFilePath(timestampMs);
           const entry = buildEntry(summary, timestampMs);
@@ -297,6 +297,21 @@ async function main() {
             type: 'boolean',
             default: false,
             describe: '在摘要輸出時同時列印 payload 十六進位'
+          })
+          .option('mesh-proxy', {
+            type: 'boolean',
+            default: false,
+            describe: '開啟 TCP 代理以利其他應用程式共用節點連線'
+          })
+          .option('mesh-proxy-port', {
+            type: 'number',
+            default: 4403,
+            describe: 'TCP 代理監聽埠號'
+          })
+          .option('mesh-proxy-host', {
+            type: 'string',
+            default: '127.0.0.1',
+            describe: 'TCP 代理監聽位址'
           })
           .option('format', {
             alias: 'f',
@@ -705,6 +720,24 @@ async function startMonitor(argv) {
     });
   }
 
+  const envProxyEnabled = process.env.MESHTASTIC_PROXY === 'true' || process.env.MESHTASTIC_PROXY === '1';
+  const proxyEnabled = argv.meshProxy || envProxyEnabled;
+  if (proxyEnabled) {
+    const envProxyPort = Number(process.env.MESHTASTIC_PROXY_PORT);
+    const proxyPort = Number.isFinite(argv.meshProxyPort) && argv.meshProxyPort > 0
+      ? argv.meshProxyPort
+      : Number.isFinite(envProxyPort) && envProxyPort > 0
+        ? envProxyPort
+        : 4403;
+    const proxyHost = argv.meshProxyHost || process.env.MESHTASTIC_PROXY_HOST || '127.0.0.1';
+
+    Object.assign(connectionOptions, {
+      proxyEnabled: true,
+      proxyPort,
+      proxyHost
+    });
+  }
+
   const RECONNECT_DELAY_MS = 30_000;
   let reconnectTimer = null;
   let currentClient = null;
@@ -826,49 +859,49 @@ async function startMonitor(argv) {
         webServer?.publishStatus({ status: 'error', message: err.message });
       });
 
-  const handleSummary = (summary, { synthetic = false } = {}) => {
-    if (!summary) return;
-    if (!synthetic) {
-      bridge.handleMeshtasticSummary(summary);
-    }
-    const displaySummary = sanitizeSummaryForDisplay(summary) || summary;
-    webServer?.publishSummary(displaySummary);
-    tryPublishWebMessage(webServer, displaySummary);
-    summaryLogger?.log(displaySummary);
+      const handleSummary = (summary, { synthetic = false } = {}) => {
+        if (!summary) return;
+        if (!synthetic) {
+          bridge.handleMeshtasticSummary(summary);
+        }
+        const displaySummary = sanitizeSummaryForDisplay(summary) || summary;
+        webServer?.publishSummary(displaySummary);
+        tryPublishWebMessage(webServer, displaySummary);
+        summaryLogger?.log(displaySummary);
 
-    if (argv.format !== 'summary') {
-      return;
-    }
+        if (argv.format !== 'summary') {
+          return;
+        }
 
-    if (!headerPrinted) {
-      console.log('Date               | Nodes                      | Relay        | Ch |   SNR | RSSI | Type         | Hops   | Details');
-      console.log('-------------------+---------------------------+--------------+----+-------+------+--------------+--------+------------------------------');
-      headerPrinted = true;
-    }
+        if (!headerPrinted) {
+          console.log('Date               | Nodes                      | Relay        | Ch |   SNR | RSSI | Type         | Hops   | Details');
+          console.log('-------------------+---------------------------+--------------+----+-------+------+--------------+--------+------------------------------');
+          headerPrinted = true;
+        }
 
-    const nodesLabel = formatNodes(displaySummary);
-    const relayLabel = computeRelayLabel(displaySummary, { selfMeshId });
-    const relayCol = padEnd(relayLabel, 12);
-    const channelCol = padValue(displaySummary.channel ?? '', 2);
-    const snrCol = formatSignal(displaySummary.snr, 2, 6, displaySummary, { selfMeshId });
-    const rssiCol = formatSignal(displaySummary.rssi, 0, 5, displaySummary, { selfMeshId });
-    const typeCol = String(displaySummary.type || '').padEnd(12);
-    const hopsCol = (displaySummary.hops?.label || '').padEnd(7);
-    const detail = displaySummary.detail || '';
+        const nodesLabel = formatNodes(displaySummary);
+        const relayLabel = computeRelayLabel(displaySummary, { selfMeshId });
+        const relayCol = padEnd(relayLabel, 12);
+        const channelCol = padValue(displaySummary.channel ?? '', 2);
+        const snrCol = formatSignal(displaySummary.snr, 2, 6, displaySummary, { selfMeshId });
+        const rssiCol = formatSignal(displaySummary.rssi, 0, 5, displaySummary, { selfMeshId });
+        const typeCol = String(displaySummary.type || '').padEnd(12);
+        const hopsCol = (displaySummary.hops?.label || '').padEnd(7);
+        const detail = displaySummary.detail || '';
 
-    const line = `${(displaySummary.timestampLabel ?? '').padEnd(19)} | ${nodesLabel.padEnd(27)} | ${relayCol} | ${channelCol} | ${snrCol} | ${rssiCol} | ${typeCol} | ${hopsCol} | ${detail}`;
-    console.log(line.trimEnd());
+        const line = `${(displaySummary.timestampLabel ?? '').padEnd(19)} | ${nodesLabel.padEnd(27)} | ${relayCol} | ${channelCol} | ${snrCol} | ${rssiCol} | ${typeCol} | ${hopsCol} | ${detail}`;
+        console.log(line.trimEnd());
 
-    if (argv['show-raw'] && displaySummary.rawHex) {
-      console.log(`  raw: ${displaySummary.rawHex}`);
-    }
+        if (argv['show-raw'] && displaySummary.rawHex) {
+          console.log(`  raw: ${displaySummary.rawHex}`);
+        }
 
-    if (Array.isArray(displaySummary.extraLines)) {
-      for (const extra of displaySummary.extraLines) {
-        console.log(`  ${extra}`);
-      }
-    }
-  };
+        if (Array.isArray(displaySummary.extraLines)) {
+          for (const extra of displaySummary.extraLines) {
+            console.log(`  ${extra}`);
+          }
+        }
+      };
 
       if (bridgeSummaryListener && typeof bridge.removeListener === 'function') {
         bridge.removeListener('summary', bridgeSummaryListener);
@@ -881,31 +914,31 @@ async function startMonitor(argv) {
         bridge.on('summary', bridgeSummaryListener);
       }
 
-  client.on('summary', (summary) => {
-    handleSummary(summary);
-  });
-
-  client.on('fromRadio', ({ message, rawPayload, summary }) => {
-    if (typeof bridge.forwardTmagRelayFromRadio === 'function') {
-      bridge.forwardTmagRelayFromRadio({ message, rawPayload, summary });
-    }
-  });
-  if (typeof bridge.forwardTmagRelayToRadio === 'function') {
-    const emitOutbound = (payloadBuffer) => {
-      bridge.forwardTmagRelayToRadio(payloadBuffer);
-    };
-    client.on('toRadioRaw', emitOutbound);
-  }
-
-  if (argv.format !== 'summary') {
-    client.on('fromRadio', ({ message }) => {
-      const object = client.toObject(message, {
-        bytes: String
+      client.on('summary', (summary) => {
+        handleSummary(summary);
       });
-      const spacing = argv.pretty ? 2 : 0;
-      console.log(JSON.stringify(object, null, spacing));
-    });
-  }
+
+      client.on('fromRadio', ({ message, rawPayload, summary }) => {
+        if (typeof bridge.forwardTmagRelayFromRadio === 'function') {
+          bridge.forwardTmagRelayFromRadio({ message, rawPayload, summary });
+        }
+      });
+      if (typeof bridge.forwardTmagRelayToRadio === 'function') {
+        const emitOutbound = (payloadBuffer) => {
+          bridge.forwardTmagRelayToRadio(payloadBuffer);
+        };
+        client.on('toRadioRaw', emitOutbound);
+      }
+
+      if (argv.format !== 'summary') {
+        client.on('fromRadio', ({ message }) => {
+          const object = client.toObject(message, {
+            bytes: String
+          });
+          const spacing = argv.pretty ? 2 : 0;
+          console.log(JSON.stringify(object, null, spacing));
+        });
+      }
 
       client.on('myInfo', (info) => {
         bridge.handleMeshtasticMyInfo(info);
