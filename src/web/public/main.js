@@ -1345,9 +1345,9 @@
     const detail = typeof summary.detail === 'string' ? summary.detail.trim() : '';
     const extra = Array.isArray(summary.extraLines)
       ? summary.extraLines
-          .map((line) => (typeof line === 'string' ? line.trim() : ''))
-          .filter(Boolean)
-          .join('\n')
+        .map((line) => (typeof line === 'string' ? line.trim() : ''))
+        .filter(Boolean)
+        .join('\n')
       : '';
     return detail || extra || '（無內容）';
   }
@@ -1369,6 +1369,9 @@
     }
     if (!relayLabel || relayLabel === 'unknown') {
       relayLabel = '未知';
+    }
+    if (relayLabel === 'Self') {
+      return '';
     }
     return relayLabel === '直收' ? '最後一跳：直收' : `最後一跳：${relayLabel}`;
   }
@@ -1631,13 +1634,13 @@
       sanitizeNodeName(entry.label),
       entry.meshId,
       entry.meshIdOriginal,
-    entry.meshIdNormalized,
-    entry.hwModel,
-    entry.hwModelLabel,
-    entry.role,
-    entry.roleLabel,
-    formatNodeCoordinateValue(entry)
-  ];
+      entry.meshIdNormalized,
+      entry.hwModel,
+      entry.hwModelLabel,
+      entry.role,
+      entry.roleLabel,
+      formatNodeCoordinateValue(entry)
+    ];
     return fields.some((value) => {
       if (!value) return false;
       return String(value).toLowerCase().includes(lowerTerm);
@@ -2152,9 +2155,9 @@
     return Boolean(summary?.relay?.guessed || summary?.relayGuess);
   }
 
-function getRelayGuessReason(summary) {
-  return summary?.relayGuessReason || RELAY_GUESS_EXPLANATION;
-}
+  function getRelayGuessReason(summary) {
+    return summary?.relayGuessReason || RELAY_GUESS_EXPLANATION;
+  }
 
   function openRelayHintDialog({ reason, relayLabel, meshId } = {}) {
     const text = reason && reason.trim() ? reason.trim() : RELAY_GUESS_EXPLANATION;
@@ -2186,16 +2189,16 @@ function getRelayGuessReason(summary) {
     document.body.classList.remove('modal-open');
   }
 
-function ensureRelayGuessSuffix(label, summary) {
-  if (!isRelayGuessed(summary)) {
-    return label;
+  function ensureRelayGuessSuffix(label, summary) {
+    if (!isRelayGuessed(summary)) {
+      return label;
+    }
+    const value = (label || '').trim();
+    if (!value) {
+      return '未知';
+    }
+    return value;
   }
-  const value = (label || '').trim();
-  if (!value) {
-    return '未知';
-  }
-  return value;
-}
 
   function formatRelay(summary) {
     if (!summary) return '直收';
@@ -2284,7 +2287,8 @@ function ensureRelayGuessSuffix(label, summary) {
     cell.innerHTML = '';
 
     const labelSpan = document.createElement('span');
-    const relayDisplay = label || (relayGuessed ? '未知' : '—');
+    const isSelf = label === 'Self';
+    const relayDisplay = isSelf ? '' : (label || (relayGuessed ? '未知' : '—'));
     labelSpan.textContent = relayDisplay;
     cell.appendChild(labelSpan);
 
@@ -4277,7 +4281,7 @@ function ensureRelayGuessSuffix(label, summary) {
     const latestLabel =
       primaryEntry && primaryEntry.meta?.name
         ? formatTelemetryFixed(primaryEntry.meta.name, primaryEntry.latestValue, primaryEntry.decimals) ||
-          '—'
+        '—'
         : '—';
     const statusLabel =
       datasetEntries
@@ -4530,7 +4534,7 @@ function ensureRelayGuessSuffix(label, summary) {
                 const formatted =
                   metricName != null
                     ? formatTelemetryFixed(metricName, ctx.parsed?.y, decimals) ||
-                      ctx.parsed?.y
+                    ctx.parsed?.y
                     : ctx.parsed?.y;
                 return `${labelText}: ${formatted}`;
               }
@@ -5408,8 +5412,8 @@ function ensureRelayGuessSuffix(label, summary) {
     const detailText = typeof summary?.detail === 'string' ? summary.detail.trim() : '';
     const extras = Array.isArray(summary?.extraLines)
       ? summary.extraLines
-          .map((line) => (line === null || line === undefined ? '' : String(line).trim()))
-          .filter(Boolean)
+        .map((line) => (line === null || line === undefined ? '' : String(line).trim()))
+        .filter(Boolean)
       : [];
     const distanceLabel = formatDistance(summary);
 
@@ -5477,7 +5481,7 @@ function ensureRelayGuessSuffix(label, summary) {
     const a =
       Math.sin(dLat / 2) * Math.sin(dLat / 2) +
       Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
-        Math.sin(dLon / 2) * Math.sin(dLon / 2);
+      Math.sin(dLon / 2) * Math.sin(dLon / 2);
     const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
     return R * c;
   }
@@ -5550,10 +5554,10 @@ function ensureRelayGuessSuffix(label, summary) {
     }
     const ssid = normalizeProvisionSsidValue(
       aprs.aprs_ssid ??
-        aprs.aprsSsid ??
-        aprs.callsign_ssid ??
-        aprs.callsignSsid ??
-        aprs.ssid
+      aprs.aprsSsid ??
+      aprs.callsign_ssid ??
+      aprs.callsignSsid ??
+      aprs.ssid
     );
     if (!ssid) {
       return base;
@@ -6488,11 +6492,11 @@ function ensureRelayGuessSuffix(label, summary) {
             hintBtn.setAttribute('aria-label', '顯示推測原因');
             hintBtn.addEventListener('click', (event) => {
               event.stopPropagation();
-            openRelayHintDialog({
-              reason: entry.relayGuessReason,
-              relayLabel: entry.relayLabel || '',
-              meshId: entry.relayMeshIdNormalized || entry.relayMeshId || ''
-            });
+              openRelayHintDialog({
+                reason: entry.relayGuessReason,
+                relayLabel: entry.relayLabel || '',
+                meshId: entry.relayMeshIdNormalized || entry.relayMeshId || ''
+              });
             });
             chipEl.appendChild(hintBtn);
           }
@@ -6543,7 +6547,7 @@ function ensureRelayGuessSuffix(label, summary) {
     if (entry.channel !== '' && entry.channel !== null && entry.channel !== undefined) {
       chips.push({ label: 'Ch', value: entry.channel });
     }
-    if (entry.relayLabel) {
+    if (entry.relayLabel && entry.relayLabel !== 'Self') {
       chips.push({ label: 'Relay', value: entry.relayLabel });
     }
     if (entry.hopsLabel) {
