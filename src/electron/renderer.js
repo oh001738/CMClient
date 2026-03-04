@@ -1480,9 +1480,9 @@ function recordChannelMessage(summary, { markUnread = true } = {}) {
   const rawDetail = typeof summary.detail === 'string' ? summary.detail.trim() : '';
   const extraDetail = Array.isArray(summary.extraLines)
     ? summary.extraLines
-      .map((line) => (typeof line === 'string' ? line.trim() : ''))
-      .filter(Boolean)
-      .join('\n')
+        .map((line) => (typeof line === 'string' ? line.trim() : ''))
+        .filter(Boolean)
+        .join('\n')
     : '';
   const text = rawDetail || extraDetail || '（無內容）';
 
@@ -1515,11 +1515,7 @@ function recordChannelMessage(summary, { markUnread = true } = {}) {
   if (!relaySummary || relaySummary === 'unknown') {
     relaySummary = '未知';
   }
-  if (relaySummary === 'Self') {
-    relaySummary = '';
-  } else {
-    relaySummary = relaySummary === '直收' ? '最後一跳：直收' : `最後一跳：${relaySummary}`;
-  }
+  relaySummary = relaySummary === '直收' ? '最後一跳：直收' : `最後一跳：${relaySummary}`;
 
   const store = channelMessageStore.get(channelId) || [];
   const existingIndex = store.findIndex((entry) => entry.flowId === flowId);
@@ -3003,8 +2999,8 @@ form.addEventListener('submit', async (event) => {
   }
 
   if (!hasHost()) {
-    setDiscoverStatus('請先設定連線目標', 'error');
-    updateStatus('error', '連線目標未設定');
+      setDiscoverStatus('請先設定連線目標', 'error');
+      updateStatus('error', '連線目標未設定');
     updateConnectAvailability();
     appendLog('CONNECT', 'blocked: missing host');
     allowReconnectLoop = true;
@@ -3367,8 +3363,7 @@ function renderRelayCell(relayCell, summary) {
   const relayGuessReason = relayGuessed ? summary.relayGuessReason || RELAY_GUESS_EXPLANATION : '';
   relayCell.innerHTML = '';
   const relayLabelSpan = document.createElement('span');
-  const isSelf = relayLabel === 'Self';
-  relayLabelSpan.textContent = isSelf ? '' : (relayLabel || (relayGuessed ? '未知' : '—'));
+  relayLabelSpan.textContent = relayLabel || (relayGuessed ? '未知' : '—');
   relayCell.appendChild(relayLabelSpan);
 
   const relayMeshId =
@@ -3831,7 +3826,7 @@ function renderFlowEntries() {
       const hopsTotalLabel = Number.isFinite(entry.hopsTotal) ? entry.hopsTotal : '?';
       metaParts.push(`<span class="chip chip-hops">Hops ${hopsUsedLabel}/${hopsTotalLabel}</span>`);
     }
-    if (entry.relayLabel && entry.relayLabel !== 'Self') {
+    if (entry.relayLabel) {
       metaParts.push(`<span class="chip chip-relay">${entry.relayLabel}</span>`);
     }
     if (Number.isFinite(entry.snr)) metaParts.push(`<span class="chip chip-snr">SNR ${entry.snr.toFixed(1)} dB</span>`);
@@ -4628,7 +4623,7 @@ function haversineKm(lat1, lon1, lat2, lon2) {
   const a =
     Math.sin(dLat / 2) * Math.sin(dLat / 2) +
     Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
-    Math.sin(dLon / 2) * Math.sin(dLon / 2);
+      Math.sin(dLon / 2) * Math.sin(dLon / 2);
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return R * c;
 }
@@ -5544,8 +5539,8 @@ function sanitizeTelemetryRecord(record, meshId) {
   const sampleTimeMs = Number.isFinite(record.sampleTimeMs)
     ? Number(record.sampleTimeMs)
     : (telemetry.timeMs != null && Number.isFinite(telemetry.timeMs)
-      ? Number(telemetry.timeMs)
-      : timestampMs);
+        ? Number(telemetry.timeMs)
+        : timestampMs);
   const nodeInfo = sanitizeTelemetryNode(record.node);
   const id =
     typeof record.id === 'string' && record.id.trim()
@@ -5963,8 +5958,8 @@ async function loadTelemetryRecordsForSelection(meshId = telemetrySelectedMeshId
     targetBucket.latestSampleMs = Number.isFinite(payload?.latestSampleMs)
       ? Number(payload.latestSampleMs)
       : (sanitizedRecords.length
-        ? sanitizedRecords[sanitizedRecords.length - 1].sampleTimeMs
-        : targetBucket.latestSampleMs ?? null);
+          ? sanitizedRecords[sanitizedRecords.length - 1].sampleTimeMs
+          : targetBucket.latestSampleMs ?? null);
     targetBucket.earliestSampleMs = Number.isFinite(payload?.earliestSampleMs)
       ? Number(payload.earliestSampleMs)
       : (sanitizedRecords.length ? sanitizedRecords[0].sampleTimeMs : targetBucket.earliestSampleMs ?? null);
@@ -8681,10 +8676,10 @@ function updateProvisionInfo(provision, mappingSyncedAt) {
     displaySymbol,
     phg: phgInfo
       ? {
-        power: phgInfo.powerWatts,
-        height: Number(phgInfo.heightMeters.toFixed(2)),
-        gain: phgInfo.gainDb
-      }
+          power: phgInfo.powerWatts,
+          height: Number(phgInfo.heightMeters.toFixed(2)),
+          gain: phgInfo.gainDb
+        }
       : null,
     comment,
     coords: infoCoords ? infoCoords.textContent : ''
