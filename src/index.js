@@ -300,17 +300,14 @@ async function main() {
           })
           .option('mesh-proxy', {
             type: 'boolean',
-            default: false,
             describe: '開啟 TCP 代理以利其他應用程式共用節點連線'
           })
           .option('mesh-proxy-port', {
             type: 'number',
-            default: 4403,
             describe: 'TCP 代理監聽埠號'
           })
           .option('mesh-proxy-host', {
             type: 'string',
-            default: '127.0.0.1',
             describe: 'TCP 代理監聽位址'
           })
           .option('format', {
