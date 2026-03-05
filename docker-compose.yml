@@ -22,10 +22,15 @@ services:
       AUTO_UPDATE_POLL_SECONDS: "${AUTO_UPDATE_POLL_SECONDS:-300}"
       MESHTASTIC_HOST: "${MESHTASTIC_HOST}"
       MESHTASTIC_PORT: "${MESHTASTIC_PORT}"
+      # --- 新增 TCP Proxy 相關設定 ---
+      MESHTASTIC_PROXY: "1" # 啟用 Proxy 功能
+      MESHTASTIC_PROXY_HOST: "0.0.0.0" # 關鍵：必須設為 0.0.0.0 才能讓容器外連線
+      MESHTASTIC_PROXY_PORT: "${MESHTASTIC_PROXY_PORT:-4403}" # Proxy 監聽埠 (預設 4403)
     volumes:
       - callmesh-data:/data/callmesh
     ports:
       - "${TMAG_WEB_PORT:-7080}:7080"
+      - "${MESHTASTIC_PROXY_PORT:-4403}:${MESHTASTIC_PROXY_PORT:-4403}" # 開放 Proxy 連接埠
     command:
       - "npm"
       - "start"
