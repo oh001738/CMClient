@@ -139,11 +139,23 @@ case $main_choice in
             SERIAL_VAL="/dev/ttyACM0"
         fi
 
+        echo "是否要啟用 TCP Proxy 功能 (讓其他 App 連線到此主機的 4403 port)？"
+        read -rp "啟用 Proxy? [y/N]: " proxy_choice
+        PROXY_ENABLE="false"
+        PROXY_HOST="127.0.0.1"
+        if [[ "$proxy_choice" == "y" || "$proxy_choice" == "Y" ]]; then
+            PROXY_ENABLE="true"
+            PROXY_HOST="0.0.0.0"
+        fi
+
         cat > .env <<EOL
 CALLMESH_API_KEY=${API_KEY}
 SERIAL_DEVICE=${SERIAL_VAL}
 MESHTASTIC_HOST=${HOST_VAL}
 MESHTASTIC_PORT=4403
+MESHTASTIC_PROXY=${PROXY_ENABLE}
+MESHTASTIC_PROXY_PORT=4403
+MESHTASTIC_PROXY_HOST=${PROXY_HOST}
 TMAG_WEB_PORT=7080
 TMAG_WEB_DASHBOARD=1
 TMAG_TIMEZONE=Asia/Taipei
@@ -184,9 +196,24 @@ esac
 
 # --- 執行任務 ---
 if [ "$NEED_GIT_SYNC" = true ]; then
-    log "同步程式碼 (git fetch & reset)..."
+    log "同步程式碼 (將本地修改備份並拉取最新版)..."
     git fetch --all
+    # 如果有本地修改，先 stash 起來
+    if ! git diff-index --quiet HEAD --; then
+        warn "偵測到本地修改，正在備份 (git stash)..."
+        git stash save "deploy_auto_stash_$(date +%s)"
+        STASHED=true
+    else
+        STASHED=false
+    fi
+    
     git reset --hard origin/main
+    
+    # 嘗試把 stash 彈回來，如果有衝突就保留原本的
+    if [ "$STASHED" = true ]; then
+        log "還原本地的修改設定..."
+        git stash pop || warn "還原本地設定時發生衝突，請手動檢查 git 狀態。"
+    fi
 fi
 
 if [ "$NEED_BUILD" = true ]; then
