@@ -26,8 +26,8 @@ fi
 check_self_update() {
     log "檢查部署腳本是否有更新..."
     if [ -d .git ]; then
-        git fetch origin main >/dev/null 2>&1 || true
-        if ! git diff --quiet HEAD origin/main -- deploy.sh; then
+        git fetch origin main >/dev/null        # 檢查本地檔案與遠端的 deploy.sh 是否不同 (不使用 HEAD 比較，避免重啟迴圈)
+        if ! git diff --quiet origin/main -- deploy.sh; then
             warn "偵測到新版 deploy.sh，正在自動更新並重啟..."
             git checkout origin/main -- deploy.sh
             chmod +x "$0"  # 確保新下載的腳本擁有執行權限
