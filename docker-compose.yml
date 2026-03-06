@@ -8,6 +8,10 @@ services:
       context: .
       dockerfile: Dockerfile
     restart: unless-stopped
+    devices:
+      - "${SERIAL_DEVICE:-/dev/ttyACM0}:${SERIAL_DEVICE:-/dev/ttyACM0}"
+    group_add:
+      - "dialout"
     environment:
       CALLMESH_API_KEY: "${CALLMESH_API_KEY}"
       CALLMESH_ARTIFACTS_DIR: "/data/callmesh"
@@ -35,10 +39,6 @@ services:
       - "npm"
       - "start"
       - "--"
-      - "--host"
-      - "${MESHTASTIC_HOST:-meshtastic.local}"
-      - "--port"
-      - "${MESHTASTIC_PORT:-4403}"
 
 volumes:
   callmesh-data:
