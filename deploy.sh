@@ -30,6 +30,7 @@ check_self_update() {
         if ! git diff --quiet HEAD origin/main -- deploy.sh; then
             warn "偵測到新版 deploy.sh，正在自動更新並重啟..."
             git checkout origin/main -- deploy.sh
+            chmod +x "$0"  # 確保新下載的腳本擁有執行權限
             log "腳本已更新，重新啟動中..."
             exec "$0" "$@"
         fi
