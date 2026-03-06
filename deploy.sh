@@ -22,27 +22,37 @@ if ! command -v docker &> /dev/null; then
     exit 1
 fi
 
-# --- 自我更新檢查 ---
-# 邏輯：僅當遠端有新的 commit 包含此腳本時才更新，避免與本地修改衝突導致迴圈
+# --- 自我更新檢查 (保證不迴圈) ---
 check_self_update() {
+    # 1. 核心保護：如果環境變數顯示已經重啟過，絕對不再跑第二次
+    if [ -n "$DEPLOY_SH_UPDATED" ]; then
+        return
+    fi
+
     if [ -d .git ]; then
         log "檢查部署腳本是否有更新..."
         git fetch origin main >/dev/null 2>&1 || true
         
-        # 檢查 origin/main 是否有 HEAD 所沒有的關於 deploy.sh 的新提交
-        UPSTREAM_CHANGES=$(git rev-list --count HEAD..origin/main -- deploy.sh || echo 0)
-        
-        if [ "$UPSTREAM_CHANGES" -gt 0 ]; then
-            warn "偵測到遠端有新版 deploy.sh ($UPSTREAM_CHANGES 個更新)，正在自動更新並重啟..."
-            git checkout origin/main -- deploy.sh
-            chmod +x "$0"
-            log "腳本已更新，重新啟動中..."
-            exec "$0" "$@"
+        # 2. 只有「檔案內容不同」且「遠端有新提交」時才執行
+        # git diff --quiet origin/main 比較的是磁碟檔案 vs 遠端檔案
+        if ! git diff --quiet origin/main -- deploy.sh; then
+            UPSTREAM_CHANGES=$(git rev-list --count HEAD..origin/main -- deploy.sh || echo 0)
+            
+            if [ "$UPSTREAM_CHANGES" -gt 0 ]; then
+                warn "偵測到遠端有新版 deploy.sh，正在自動更新並重啟..."
+                git checkout origin/main -- deploy.sh
+                chmod +x "$0"
+                
+                # 3. 設置環境變數並重啟，exec 會繼承此變數
+                export DEPLOY_SH_UPDATED=1
+                log "腳本已更新，重新啟動中..."
+                exec "$0" "$@"
+            fi
         fi
     fi
 }
 
-# --- 執行自我更新 ---
+# --- 啟動自我更新流程 ---
 check_self_update
 
 # --- 互動函式 ---
@@ -81,7 +91,7 @@ select_serial_device() {
     fi
 }
 
-# --- 主選單 ---
+# --- 主程式面 ---
 cat << "EOF"
   ____ ___  ____  _     _     ____  ____ 
  / ___|  \/  | | | |   | |   |  _ \/ ___|
