@@ -23,19 +23,27 @@ if ! command -v docker &> /dev/null; then
 fi
 
 # --- 自我更新檢查 ---
+# 邏輯：僅當遠端有新的 commit 包含此腳本時才更新，避免與本地修改衝突導致迴圈
 check_self_update() {
-    log "檢查部署腳本是否有更新..."
     if [ -d .git ]; then
-        git fetch origin main >/dev/null        # 檢查本地檔案與遠端的 deploy.sh 是否不同 (不使用 HEAD 比較，避免重啟迴圈)
-        if ! git diff --quiet origin/main -- deploy.sh; then
-            warn "偵測到新版 deploy.sh，正在自動更新並重啟..."
+        log "檢查部署腳本是否有更新..."
+        git fetch origin main >/dev/null 2>&1 || true
+        
+        # 檢查 origin/main 是否有 HEAD 所沒有的關於 deploy.sh 的新提交
+        UPSTREAM_CHANGES=$(git rev-list --count HEAD..origin/main -- deploy.sh || echo 0)
+        
+        if [ "$UPSTREAM_CHANGES" -gt 0 ]; then
+            warn "偵測到遠端有新版 deploy.sh ($UPSTREAM_CHANGES 個更新)，正在自動更新並重啟..."
             git checkout origin/main -- deploy.sh
-            chmod +x "$0"  # 確保新下載的腳本擁有執行權限
+            chmod +x "$0"
             log "腳本已更新，重新啟動中..."
             exec "$0" "$@"
         fi
     fi
 }
+
+# --- 執行自我更新 ---
+check_self_update
 
 # --- 互動函式 ---
 prompt_api_key() {
@@ -73,9 +81,6 @@ select_serial_device() {
     fi
 }
 
-# --- 執行自我更新 ---
-check_self_update
-
 # --- 主選單 ---
 cat << "EOF"
   ____ ___  ____  _     _     ____  ____ 
@@ -96,7 +101,6 @@ read -rp "請選擇操作 [1-5]: " main_choice
 
 NEED_GIT_SYNC=false
 NEED_BUILD=false
-NEED_RESTART=true
 
 case $main_choice in
     1)
