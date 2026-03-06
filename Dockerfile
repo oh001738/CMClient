@@ -10,7 +10,7 @@ ENV NODE_ENV=production \
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates git \
+    && apt-get install -y --no-install-recommends ca-certificates git build-essential python3 libudev-dev \
     && rm -rf /var/lib/apt/lists/*
 
 COPY package.json package-lock.json ./
