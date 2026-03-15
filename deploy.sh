@@ -127,8 +127,15 @@ case $main_choice in
         NEED_BUILD=true
         
         if [[ -f docker-compose.yml ]]; then
-            warn "正在移除舊有的容器與磁碟卷 (Volumes)..."
-            docker compose down -v --remove-orphans || true
+            warn "警告：這將會永久刪除所有存儲在 Volume 中的應用資料 (包含歷史記錄，但 .env 中的設定可重新輸入)。"
+            read -rp "確定要繼續全新安裝並覆蓋資料嗎？ [y/N]: " confirm_wipe
+            if [[ "$confirm_wipe" == "y" || "$confirm_wipe" == "Y" ]]; then
+                log "正在移除舊有的容器與磁碟卷 (Volumes)..."
+                docker compose down -v --remove-orphans || true
+            else
+                log "已取消全新安裝流程。"
+                exit 0
+            fi
         fi
         
         API_KEY=$(prompt_api_key)
@@ -231,7 +238,8 @@ if [ "$NEED_GIT_SYNC" = true ]; then
     # 嘗試把 stash 彈回來，如果有衝突就保留原本的
     if [ "$STASHED" = true ]; then
         log "還原本地的修改設定..."
-        git stash pop || warn "還原本地設定時發生衝突，請手動檢查 git 狀態。"
+        # 由於腳本設定了 set -e, 若 git stash pop 發生衝突會回傳非 0，這裡用 >/dev/null 2>&1 吞下並捕捉錯誤
+        git stash pop >/dev/null 2>&1 || warn "還原本地設定時發生衝突。已將衝突的程式碼保留在暫存區 (stash) 中，系統將使用伺服器版本繼續啟動。請稍後手動檢查 git 狀態。"
     fi
 fi
 

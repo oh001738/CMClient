@@ -20,3 +20,4 @@ dist/
 docs/callmesh-client.md
 docs/handover.md
 .env
+docker-compose.override.yml
