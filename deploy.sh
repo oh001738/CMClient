@@ -256,5 +256,5 @@ docker image prune -f
 
 echo "------------------------------------------"
 log "✅ 操作完成！"
-echo "您可以執行 'docker compose logs -f callmesh-client' 查看運行狀況。"
+echo "您可以執行 'sudo docker compose logs -f callmesh-client' 查看運行狀況。"
 echo "------------------------------------------"
