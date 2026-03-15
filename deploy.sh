@@ -33,21 +33,29 @@ check_self_update() {
         log "檢查部署腳本是否有更新..."
         git fetch origin main >/dev/null 2>&1 || true
         
-        # 2. 只有「檔案內容不同」且「遠端有新提交」時才執行
-        # git diff --quiet origin/main 比較的是磁碟檔案 vs 遠端檔案
-        if ! git diff --quiet origin/main -- deploy.sh; then
-            UPSTREAM_CHANGES=$(git rev-list --count HEAD..origin/main -- deploy.sh || echo 0)
+        UPSTREAM_CHANGES=$(git rev-list --count HEAD..origin/main -- deploy.sh 2>/dev/null || echo 0)
+        
+        if [ "$UPSTREAM_CHANGES" -gt 0 ]; then
+            warn "偵測到遠端有新版 deploy.sh，為確保執行順利，即將自動同步程式碼並重啟..."
             
-            if [ "$UPSTREAM_CHANGES" -gt 0 ]; then
-                warn "偵測到遠端有新版 deploy.sh，正在自動更新並重啟..."
-                git checkout origin/main -- deploy.sh
-                chmod +x "$0"
-                
-                # 3. 設置環境變數並重啟，exec 會繼承此變數
-                export DEPLOY_SH_UPDATED=1
-                log "腳本已更新，重新啟動中..."
-                exec "$0" "$@"
+            # 如果有本地修改，先備份以免被覆蓋
+            if ! git diff-index --quiet HEAD --; then
+                git stash save "deploy_auto_stash_$(date +%s)" >/dev/null 2>&1
+                STASHED=true
+            else
+                STASHED=false
             fi
+            
+            git reset --hard origin/main >/dev/null 2>&1
+            
+            if [ "$STASHED" = true ]; then
+                git stash pop >/dev/null 2>&1 || true
+            fi
+            
+            # 3. 設置環境變數並重啟
+            export DEPLOY_SH_UPDATED=1
+            log "腳本已自動同步為最新版，重新啟動中..."
+            exec bash "$0" "$@"
         fi
     fi
 }
@@ -133,10 +141,21 @@ case $main_choice in
             DEVICE_PATH=$(select_serial_device)
             HOST_VAL="serial:${DEVICE_PATH}"
             SERIAL_VAL="${DEVICE_PATH}"
+            
+            # 動態生成 docker-compose.override.yml 進行掛載
+            cat > docker-compose.override.yml <<EOF
+services:
+  callmesh-client:
+    devices:
+      - "\${SERIAL_DEVICE}:\${SERIAL_DEVICE}"
+EOF
         else
             read -rp "請輸入 Meshtastic IP/Host [預設 meshtastic.local]: " tcp_host
             HOST_VAL="${tcp_host:-meshtastic.local}"
             SERIAL_VAL="/dev/ttyACM0"
+            
+            # TCP 模式不需要掛載裝置，移除 override 如果存在
+            rm -f docker-compose.override.yml
         fi
 
         echo "是否要啟用 TCP Proxy 功能 (讓其他 App 連線到此主機的 4403 port)？"
